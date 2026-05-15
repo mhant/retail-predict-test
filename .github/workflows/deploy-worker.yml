@@ -11,6 +11,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: retail-predict   # loads CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
     defaults:
       run:
         working-directory: cloudflare

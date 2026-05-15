@@ -9,6 +9,7 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: retail-predict   # loads environment secrets WORKER_URL + WRITE_TOKEN
 
     steps:
       - uses: actions/checkout@v4
