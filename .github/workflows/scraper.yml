@@ -1,8 +1,9 @@
-name: M3-M6 — Hourly Scraper Pipeline
+name: M3-M6 — Scraper Pipeline
 
 on:
   schedule:
-    - cron: '55 * * * *'  # at :55 past every hour (avoids congested top-of-hour slot)
+    - cron: '0 8 * * *'   # 08:00 UTC daily  (~4 AM ET / 9 AM London)
+    - cron: '0 20 * * *'  # 20:00 UTC daily  (~4 PM ET / 9 PM London)
   workflow_dispatch:        # manual trigger from GitHub Actions UI
 
 jobs:
