@@ -174,16 +174,30 @@ export default {
     // ── Read API (public, no auth) ────────────────────────────────────────────
 
     // GET /api/sentiment?window=168
+    // Aggregates raw_mentions directly using scraped_utc so all window sizes work.
     if (request.method === 'GET' && path === '/api/sentiment') {
-      const window = parseInt(params.get('window') || '168', 10);
+      const windowHours = parseInt(params.get('window') || '168', 10);
+      const cutoff = Date.now() / 1000 - windowHours * 3600;
       const { results } = await env.DB.prepare(
-        `SELECT ticker, mention_count, avg_sentiment, upvote_weighted_sentiment,
-                avg_upvote_ratio, source_count, top_title, computed_at
-         FROM ticker_sentiment_summary
-         WHERE window_hours = ?1
-         ORDER BY mention_count DESC LIMIT 200`
-      ).bind(window).all();
-      return apiJson({ ok: true, window_hours: window, data: results });
+        `SELECT
+           ticker,
+           COUNT(*)                                    AS mention_count,
+           AVG(vader_compound)                         AS avg_sentiment,
+           AVG(vader_compound)                         AS upvote_weighted_sentiment,
+           AVG(upvote_ratio)                           AS avg_upvote_ratio,
+           COUNT(DISTINCT subreddit)                   AS source_count,
+           (SELECT title FROM raw_mentions sub
+            WHERE sub.ticker = rm.ticker
+              AND sub.scraped_utc >= ?1
+              AND sub.vader_compound IS NOT NULL
+            ORDER BY score DESC LIMIT 1)              AS top_title
+         FROM raw_mentions rm
+         WHERE scraped_utc >= ?1 AND vader_compound IS NOT NULL
+         GROUP BY ticker
+         ORDER BY mention_count DESC
+         LIMIT 200`
+      ).bind(cutoff).all();
+      return apiJson({ ok: true, window_hours: windowHours, data: results });
     }
 
     // GET /api/mentions?ticker=GME
