@@ -9,7 +9,8 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: retail-predict   # loads environment secrets WORKER_URL + WRITE_TOKEN
+    # Secrets come from Repository secrets (not environment secrets)
+    # so scheduled cron triggers are not gated by environment protection rules.
 
     steps:
       - uses: actions/checkout@v4
