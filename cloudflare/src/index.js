@@ -186,19 +186,19 @@ export default {
       return apiJson({ ok: true, window_hours: window, data: results });
     }
 
-    // GET /api/mentions?ticker=GME&window=168
+    // GET /api/mentions?ticker=GME
+    // No time filter — top-scored PullPush posts can be months old, a window
+    // filter would exclude all real data. Returns top 50 by score instead.
     if (request.method === 'GET' && path === '/api/mentions') {
       const ticker = params.get('ticker');
-      const window = parseInt(params.get('window') || '168', 10);
       if (!ticker) return apiJson({ ok: false, error: 'ticker param required' }, 400);
-      const cutoff = Date.now() / 1000 - window * 3600;
       const { results } = await env.DB.prepare(
         `SELECT title, selftext, author, score, ups, upvote_ratio, num_comments,
                 created_utc, vader_compound, subreddit, url
          FROM raw_mentions
-         WHERE ticker = ?1 AND created_utc >= ?2
+         WHERE ticker = ?1
          ORDER BY score DESC LIMIT 50`
-      ).bind(ticker, cutoff).all();
+      ).bind(ticker).all();
       return apiJson({ ok: true, ticker, data: results });
     }
 
