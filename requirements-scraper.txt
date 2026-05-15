@@ -1,0 +1,4 @@
+requests>=2.31
+feedparser>=6.0
+vaderSentiment>=3.3
+yfinance>=0.2.36
