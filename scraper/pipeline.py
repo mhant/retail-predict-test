@@ -7,13 +7,15 @@ Flow:
   3. yFinance         → price_snapshots + institutional_data
   4. CNBC / SA RSS   → news_articles
   5. SEC EDGAR        → insider_trades
-  6. Record           → pipeline_runs
+  6. Record           → pipeline_runs + scraper_events (invalid/delisted tickers)
 """
 from __future__ import annotations
 
+import logging
 import re
 import sys
 import time
+import warnings
 from collections import Counter, defaultdict
 
 import feedparser
@@ -23,6 +25,10 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from scraper import config
 from scraper import d1_client as d1
+
+# Suppress yfinance's noisy stderr warnings — we log them to D1 instead
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+warnings.filterwarnings("ignore", category=UserWarning, module="yfinance")
 
 # ── VADER setup ────────────────────────────────────────────────────────────────
 _vader = SentimentIntensityAnalyzer()
@@ -40,20 +46,46 @@ _CAPS_RE    = re.compile(r"\b([A-Z]{2,5})\b")
 
 
 def extract_tickers(text: str) -> list[str]:
-    """Extract stock tickers from text. Cashtags take priority; all-caps filtered against watchlist."""
+    """
+    Three-stage ticker extraction:
+      1. Cashtag regex ($GME) — highest precision, always trusted
+      2. ALL-CAPS words filtered against watchlist — moderate precision
+      3. Company name lookup (case-insensitive) gated by financial context words —
+         catches "tesla stock" / "gamestop shares" without matching "I ate an apple"
+    """
     if not text:
         return []
     found: dict[str, int] = {}
+
+    # Stage 1: cashtags
     for m in _CASHTAG_RE.finditer(text):
         sym = m.group(1)
         if sym not in found:
             found[sym] = m.start()
+
+    # Stage 2: ALL-CAPS watchlist words
     for m in _CAPS_RE.finditer(text):
         sym = m.group(1)
         if sym in found or sym in config.STOPWORDS:
             continue
         if sym in config.WATCHLIST:
             found[sym] = m.start()
+
+    # Stage 3: company name matching — only when financial context is present
+    lower = text.lower()
+    if any(w in lower for w in config.FINANCIAL_CONTEXT):
+        for name, ticker in config.NAME_TO_TICKER.items():
+            if ticker in found:
+                continue
+            pos = lower.find(name)
+            if pos == -1:
+                continue
+            # Whole-word check: character before and after must not be alpha
+            before_ok = (pos == 0 or not lower[pos - 1].isalpha())
+            after_ok  = (pos + len(name) >= len(lower) or not lower[pos + len(name)].isalpha())
+            if before_ok and after_ok:
+                found[ticker] = pos
+
     return [s for s, _ in sorted(found.items(), key=lambda x: x[1])]
 
 
@@ -172,18 +204,34 @@ def compute_sentiment_summary(mentions: list[dict]) -> list[dict]:
 
 # ── Market data (yFinance) ─────────────────────────────────────────────────────
 
-def fetch_market_data(tickers: list[str]) -> tuple[list[dict], list[dict]]:
-    """Returns (price_snapshot_rows, institutional_data_rows)."""
-    price_rows: list[dict] = []
-    inst_rows:  list[dict] = []
+def fetch_market_data(
+    tickers: list[str], pipeline_started_at: float
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Returns (price_snapshot_rows, institutional_data_rows, scraper_event_rows).
+    Invalid/delisted tickers are logged to scraper_events instead of printing warnings.
+    """
+    price_rows:   list[dict] = []
+    inst_rows:    list[dict] = []
+    event_rows:   list[dict] = []
     today = time.strftime("%Y-%m-%d")
+    now   = time.time()
 
     for ticker in tickers:
         try:
-            t = yf.Ticker(ticker)
-
-            # OHLCV — last 7 days of daily bars
+            t    = yf.Ticker(ticker)
             hist = t.history(period="7d", interval="1d", auto_adjust=True)
+
+            if hist.empty:
+                event_rows.append({
+                    "event_type":          "ticker_not_found",
+                    "ticker":              ticker,
+                    "detail":              "yfinance returned empty history (possibly delisted)",
+                    "pipeline_started_at": pipeline_started_at,
+                    "occurred_at":         now,
+                })
+                continue
+
             for ts, row in hist.iterrows():
                 price_rows.append({
                     "ticker":   ticker,
@@ -196,32 +244,37 @@ def fetch_market_data(tickers: list[str]) -> tuple[list[dict], list[dict]]:
                     "volume":   int(row["Volume"])   if row["Volume"] else None,
                 })
 
-            # Institutional / short interest
-            info = t.fast_info
-            inst_rows.append({
-                "ticker":                      ticker,
-                "report_date":                 today,
-                "short_interest_pct":          getattr(info, "three_month_average_volume", None) and None,
-            })
-
-            # Better short interest from .info (slower but accurate)
+            inst_row: dict = {"ticker": ticker, "report_date": today}
             try:
                 full_info = t.info
-                inst_rows[-1].update({
+                inst_row.update({
                     "short_interest_pct":          full_info.get("shortPercentOfFloat"),
                     "short_ratio":                 full_info.get("shortRatio"),
                     "institutional_ownership_pct": full_info.get("institutionsPercentHeld"),
                 })
             except Exception:
                 pass
+            inst_rows.append(inst_row)
 
             time.sleep(0.3)
 
         except Exception as exc:
-            print(f"  [yfinance] {ticker}: {exc}")
+            detail = str(exc)[:300]
+            event_type = "delisted" if "delisted" in detail.lower() else "parse_error"
+            event_rows.append({
+                "event_type":          event_type,
+                "ticker":              ticker,
+                "detail":              detail,
+                "pipeline_started_at": pipeline_started_at,
+                "occurred_at":         now,
+            })
 
-    print(f"  [yfinance] {len(price_rows)} price rows, {len(inst_rows)} inst rows for {len(tickers)} tickers")
-    return price_rows, inst_rows
+    print(f"  [yfinance] {len(price_rows)} price rows, {len(inst_rows)} ok, {len(event_rows)} skipped")
+    if event_rows:
+        skipped = [e["ticker"] for e in event_rows]
+        print(f"  [yfinance] skipped tickers: {skipped}")
+
+    return price_rows, inst_rows, event_rows
 
 
 # ── News RSS (CNBC + Seeking Alpha) ───────────────────────────────────────────
@@ -329,13 +382,17 @@ def run() -> None:
         print(f"  → {len(summaries)} ticker summaries written")
 
         print("\n── Fetching market data (yFinance) ──")
-        # Focus on top-mentioned tickers this run
         ticker_counts = Counter(m["ticker"] for m in mentions)
         top_tickers   = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
-        price_rows, inst_rows = fetch_market_data(top_tickers)
+        price_rows, inst_rows, event_rows = fetch_market_data(top_tickers, started_at)
 
-        d1.ingest("price_snapshots",   price_rows)
-        d1.ingest("institutional_data", [r for r in inst_rows if any(v for k, v in r.items() if k != "ticker" and k != "report_date" and v is not None)], mode="replace")
+        d1.ingest("price_snapshots", price_rows)
+        d1.ingest("institutional_data", [
+            r for r in inst_rows
+            if any(v for k, v in r.items() if k not in ("ticker", "report_date") and v is not None)
+        ], mode="replace")
+        if event_rows:
+            d1.ingest("scraper_events", event_rows)
         stats["prices_updated"] = len(price_rows)
 
         print("\n── Fetching news (CNBC + Seeking Alpha) ──")

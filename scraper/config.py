@@ -83,6 +83,64 @@ STOPWORDS: frozenset[str] = frozenset([
     "EUR", "USD", "GBP", "CAD", "ETH", "SK", "RH",
 ])
 
+# Financial context words — used to gate company-name matching so "I ate an apple"
+# never becomes AAPL but "apple stock looks cheap" does.
+FINANCIAL_CONTEXT: frozenset[str] = frozenset([
+    "stock", "stocks", "share", "shares", "equity", "equities",
+    "buy", "bought", "buying", "sell", "sold", "selling",
+    "short", "shorting", "long", "position", "positions",
+    "call", "calls", "put", "puts", "option", "options",
+    "trade", "trading", "trader", "invest", "investing", "investor",
+    "price", "ticker", "market", "earnings", "revenue", "profit",
+    "dividend", "yield", "ipo", "portfolio", "holding", "holdings",
+    "bullish", "bearish", "bull", "bear", "rally", "dump", "moon",
+    "squeeze", "yolo", "tendies", "gains", "losses", "dd",
+])
+
+# Company name → ticker mapping for lowercase/natural-language detection.
+# Only matched when FINANCIAL_CONTEXT words appear in the same text.
+# Deliberately conservative — excluded common words that cause too many false positives
+# even with context (e.g. "meta", "riot", "snap" as non-finance words).
+NAME_TO_TICKER: dict[str, str] = {
+    # Big tech — specific enough to be safe
+    "apple":        "AAPL",
+    "microsoft":    "MSFT",
+    "nvidia":       "NVDA",
+    "intel":        "INTC",
+    "tesla":        "TSLA",
+    "amazon":       "AMZN",
+    "alphabet":     "GOOGL",
+    "google":       "GOOGL",
+    "netflix":      "NFLX",
+    "uber":         "UBER",
+    "lyft":         "LYFT",
+    # Meme / retail faves
+    "gamestop":     "GME",
+    "game stop":    "GME",
+    "coinbase":     "COIN",
+    "palantir":     "PLTR",
+    "robinhood":    "HOOD",
+    "sofi":         "SOFI",
+    "affirm":       "AFRM",
+    "upstart":      "UPST",
+    "roblox":       "RBLX",
+    "draftkings":   "DKNG",
+    "opendoor":     "OPEN",
+    "lemonade":     "LMND",
+    # EV
+    "rivian":       "RIVN",
+    "lucid":        "LCID",
+    # Crypto adjacent
+    "microstrategy": "MSTR",
+    "marathon digital": "MARA",
+    # Banks / finance
+    "jpmorgan":     "JPM",
+    "jp morgan":    "JPM",
+    "bank of america": "BAC",
+    "goldman":      "GS",
+    "goldman sachs": "GS",
+}
+
 # Finance slang lexicon injected into VADER
 FINANCE_LEXICON: dict[str, float] = {
     "moon": 3.0, "mooning": 3.0, "tendies": 2.5, "squeeze": 2.0,

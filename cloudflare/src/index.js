@@ -73,6 +73,9 @@ const SCHEMA = {
     'prediction_id', 'predicted_signal', 'predicted_prob_up',
     'actual_return', 'evaluated_at', 'was_correct',
   ],
+  scraper_events: [
+    'event_type', 'ticker', 'detail', 'pipeline_started_at', 'occurred_at',
+  ],
 };
 
 // Tables where we REPLACE (upsert) instead of IGNORE on conflict
