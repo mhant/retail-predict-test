@@ -1,16 +1,30 @@
 /**
- * Retail Predict — Cloudflare Worker write proxy (M2)
+ * Retail Predict — Cloudflare Worker (write proxy + read API)
  *
- * The GitHub Actions Python scraper POSTs batches of data here.
- * This Worker authenticates, validates, and bulk-inserts into D1.
+ * Write (requires Authorization: Bearer <WRITE_TOKEN>):
+ *   POST /ingest                — bulk insert rows into a D1 table
  *
- * Endpoints:
- *   GET  /health          — health check (no auth)
- *   POST /ingest          — bulk insert rows into a table (requires auth)
- *
- * Auth: Authorization: Bearer <WRITE_TOKEN>
- * WRITE_TOKEN is set with: wrangler secret put WRITE_TOKEN
+ * Read (public, CORS-enabled for React frontend):
+ *   GET  /api/sentiment         — ticker sentiment summaries (?window=168)
+ *   GET  /api/mentions          — mentions for a ticker (?ticker=GME&window=168)
+ *   GET  /api/prices            — OHLCV for a ticker (?ticker=GME&interval=1d)
+ *   GET  /api/pipeline          — recent pipeline run history
+ *   GET  /api/events            — recent scraper events (invalid tickers etc.)
+ *   GET  /health                — DB connectivity check
  */
+
+const CORS = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+function apiJson(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS },
+  });
+}
 
 // Whitelisted tables and their accepted column names.
 // Any table or column not listed here is rejected — prevents SQL injection.
@@ -91,7 +105,7 @@ const D1_BATCH_SIZE = 100; // D1 batch limit per call
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...CORS },
   });
 }
 
@@ -147,8 +161,81 @@ async function batchInsert(db, table, rows, mode) {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+    const url    = new URL(request.url);
+    const path   = url.pathname;
+    const params = url.searchParams;
+
+    // CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS });
+    }
+
+    // ── Read API (public, no auth) ────────────────────────────────────────────
+
+    // GET /api/sentiment?window=168
+    if (request.method === 'GET' && path === '/api/sentiment') {
+      const window = parseInt(params.get('window') || '168', 10);
+      const { results } = await env.DB.prepare(
+        `SELECT ticker, mention_count, avg_sentiment, upvote_weighted_sentiment,
+                avg_upvote_ratio, source_count, top_title, computed_at
+         FROM ticker_sentiment_summary
+         WHERE window_hours = ?1
+         ORDER BY mention_count DESC LIMIT 200`
+      ).bind(window).all();
+      return apiJson({ ok: true, window_hours: window, data: results });
+    }
+
+    // GET /api/mentions?ticker=GME&window=168
+    if (request.method === 'GET' && path === '/api/mentions') {
+      const ticker = params.get('ticker');
+      const window = parseInt(params.get('window') || '168', 10);
+      if (!ticker) return apiJson({ ok: false, error: 'ticker param required' }, 400);
+      const cutoff = Date.now() / 1000 - window * 3600;
+      const { results } = await env.DB.prepare(
+        `SELECT title, selftext, author, score, ups, upvote_ratio, num_comments,
+                created_utc, vader_compound, subreddit, url
+         FROM raw_mentions
+         WHERE ticker = ?1 AND created_utc >= ?2
+         ORDER BY score DESC LIMIT 50`
+      ).bind(ticker, cutoff).all();
+      return apiJson({ ok: true, ticker, data: results });
+    }
+
+    // GET /api/prices?ticker=GME&interval=1d
+    if (request.method === 'GET' && path === '/api/prices') {
+      const ticker   = params.get('ticker');
+      const interval = params.get('interval') || '1d';
+      if (!ticker) return apiJson({ ok: false, error: 'ticker param required' }, 400);
+      const { results } = await env.DB.prepare(
+        `SELECT ts, open, high, low, close, volume,
+                rsi_14, macd_histogram, bb_upper, bb_lower,
+                sma_20, sma_50, volume_ratio_20d
+         FROM price_snapshots
+         WHERE ticker = ?1 AND interval = ?2
+         ORDER BY ts ASC`
+      ).bind(ticker, interval).all();
+      return apiJson({ ok: true, ticker, interval, data: results });
+    }
+
+    // GET /api/pipeline
+    if (request.method === 'GET' && path === '/api/pipeline') {
+      const { results } = await env.DB.prepare(
+        `SELECT id, started_at, finished_at, status, triggered_by,
+                mentions_scraped, new_mentions, prices_updated,
+                predictions_written, error_message
+         FROM pipeline_runs ORDER BY started_at DESC LIMIT 20`
+      ).all();
+      return apiJson({ ok: true, data: results });
+    }
+
+    // GET /api/events
+    if (request.method === 'GET' && path === '/api/events') {
+      const { results } = await env.DB.prepare(
+        `SELECT event_type, ticker, detail, occurred_at
+         FROM scraper_events ORDER BY occurred_at DESC LIMIT 100`
+      ).all();
+      return apiJson({ ok: true, data: results });
+    }
 
     // ── Health check (no auth) ────────────────────────────────────────────────
     if (request.method === 'GET' && path === '/health') {
