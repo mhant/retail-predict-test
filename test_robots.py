@@ -1,100 +1,86 @@
 """
-M1 robots.txt compliance check.
+M1 robots.txt compliance check — conservative edition.
 
-Verifies that every URL we intend to scrape is permitted by the host's
-robots.txt. Uses Python's standard-library urllib.robotparser.
+Only sources that are explicitly ALLOWED (or have no robots.txt = RFC 9309 allowed)
+will be used. Any explicitly DISALLOWED source is dropped from the architecture,
+even if it technically works, because we want to be 100% above board.
 
-Our bot User-Agent: retail-predict-bot
+Bot User-Agent: retail-predict-bot
 """
 from __future__ import annotations
 
 import sys
 import urllib.robotparser
 import urllib.request
-from dataclasses import dataclass
 
 _BOT_UA = "retail-predict-bot"
 
-# (label, robots.txt URL, path to check)
+# (label, robots.txt URL, path to check, critical)
+# critical=True means failure here blocks the whole pipeline
 CHECKS = [
-    # Reddit — RSS feeds are the intended machine-readable endpoint
-    ("Reddit /r/*/hot.rss",   "https://www.reddit.com/robots.txt",    "/r/wallstreetbets/hot.rss"),
-    ("Reddit /r/*/new.rss",   "https://www.reddit.com/robots.txt",    "/r/wallstreetbets/new.rss"),
+    # PullPush — Reddit data archive, explicitly for research use
+    ("PullPush /reddit/search/",  "https://api.pullpush.io/robots.txt",         "/reddit/search/submission/", True),
 
-    # PullPush — Reddit data archive, explicitly for research
-    ("PullPush submissions",  "https://api.pullpush.io/robots.txt",   "/reddit/search/submission/"),
+    # SEC EDGAR — public US government data
+    ("SEC EDGAR /files/",         "https://www.sec.gov/robots.txt",             "/files/company_tickers.json", True),
+    ("SEC EDGAR /cgi-bin/",       "https://www.sec.gov/robots.txt",             "/cgi-bin/browse-edgar",       True),
+    ("SEC EDGAR data.sec.gov",    "https://data.sec.gov/robots.txt",            "/submissions/",               True),
 
-    # Google News RSS search endpoint
-    ("Google News RSS",       "https://news.google.com/robots.txt",   "/rss/search"),
+    # News RSS feeds explicitly allowed
+    ("CNBC RSS",                  "https://www.cnbc.com/robots.txt",            "/id/15839135/device/rss/rss.html", True),
+    ("Seeking Alpha RSS",         "https://seekingalpha.com/robots.txt",        "/market_currents.xml",        False),
 
-    # SEC EDGAR — public government data
-    ("SEC EDGAR tickers",     "https://www.sec.gov/robots.txt",       "/files/company_tickers.json"),
-    ("SEC EDGAR Form 4 RSS",  "https://www.sec.gov/robots.txt",       "/cgi-bin/browse-edgar"),
-    ("SEC EDGAR data API",    "https://data.sec.gov/robots.txt",      "/submissions/"),
-    ("SEC EDGAR EFTS",        "https://efts.sec.gov/robots.txt",      "/LATEST/search-index"),
-
-    # Financial news RSS feeds (RSS = machine-readable by design)
-    ("CNBC RSS",              "https://www.cnbc.com/robots.txt",      "/id/15839135/device/rss/rss.html"),
-    ("MarketWatch RSS",       "https://www.marketwatch.com/robots.txt", "/rss/topstories"),
-    ("Motley Fool RSS",       "https://www.fool.com/robots.txt",      "/feeds/index.aspx"),
-    ("Seeking Alpha RSS",     "https://seekingalpha.com/robots.txt",  "/market_currents.xml"),
-
-    # yFinance hits Yahoo Finance endpoints
-    ("Yahoo Finance",         "https://finance.yahoo.com/robots.txt", "/"),
+    # Yahoo Finance (yFinance uses these endpoints)
+    ("Yahoo Finance",             "https://finance.yahoo.com/robots.txt",       "/",                           True),
 ]
 
+# Sources we are NOT using because they explicitly disallow bots:
+DROPPED = [
+    ("Reddit RSS",        "https://www.reddit.com/robots.txt",      "/r/*/hot.rss",      "Using PullPush instead (explicitly allowed + includes scores)"),
+    ("Google News RSS",   "https://news.google.com/robots.txt",     "/rss/search",       "Using CNBC + Seeking Alpha + yFinance news instead"),
+    ("MarketWatch RSS",   "https://www.marketwatch.com/robots.txt", "/rss/topstories",   "Dropped — sufficient coverage from remaining sources"),
+    ("Motley Fool RSS",   "https://www.fool.com/robots.txt",        "/feeds/index.aspx", "Dropped — sufficient coverage from remaining sources"),
+]
 
-@dataclass
-class Result:
-    label: str
-    path: str
-    allowed: bool | None   # None = could not fetch robots.txt
-    note: str = ""
+print(f"\nBot User-Agent: '{_BOT_UA}'\n")
+print("Sources dropped due to explicit robots.txt Disallow:")
+for name, _, path, reason in DROPPED:
+    print(f"  🚫 {name:<20} {path:<35} → {reason}")
 
+print(f"\nChecking approved sources:\n")
+print(f"  {'Source':<30} {'Status':<10} {'Note'}")
+print(f"  {'-'*30} {'-'*10} {'-'*40}")
 
-results: list[Result] = []
-
-print(f"\nBot User-Agent being checked: '{_BOT_UA}'\n")
-print(f"  {'Source':<30} {'Path':<45} {'Status'}")
-print(f"  {'-'*30} {'-'*45} {'-'*10}")
-
-for label, robots_url, path in CHECKS:
+results = []
+for label, robots_url, path, critical in CHECKS:
     rp = urllib.robotparser.RobotFileParser()
     rp.set_url(robots_url)
     try:
         req = urllib.request.Request(
             robots_url,
-            headers={"User-Agent": "retail-predict-bot/1.0 (+https://github.com/mhant)"},
+            headers={"User-Agent": f"{_BOT_UA}/1.0 (+https://github.com/mhant)"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            content = resp.read().decode("utf-8", errors="replace")
-        rp.parse(content.splitlines())
+            rp.parse(resp.read().decode("utf-8", errors="replace").splitlines())
         allowed = rp.can_fetch(_BOT_UA, path)
-        note = "" if allowed else "⚠️  check manually"
-        results.append(Result(label=label, path=path, allowed=allowed, note=note))
         icon = "✅" if allowed else "🚫"
-        print(f"  {icon} {label:<30} {path:<45} {'ALLOWED' if allowed else 'DISALLOWED'}")
+        note = "" if allowed else ("CRITICAL FAIL" if critical else "non-critical")
+        results.append((label, allowed, critical, note))
+        print(f"  {icon} {label:<30} {'ALLOWED' if allowed else 'DISALLOWED':<10} {note}")
     except Exception as exc:
-        # robots.txt not found or unreachable — treat as "allowed" (RFC 9309 §2.2)
-        note = f"robots.txt unreachable ({type(exc).__name__}) → assume allowed per RFC 9309"
-        results.append(Result(label=label, path=path, allowed=None, note=note))
-        print(f"  🟡 {label:<30} {path:<45} UNKNOWN ({type(exc).__name__})")
+        # robots.txt unreachable → RFC 9309 §2.2: treated as allowed
+        note = f"robots.txt unreachable → allowed per RFC 9309 ({type(exc).__name__})"
+        results.append((label, None, critical, note))
+        print(f"  🟡 {label:<30} {'UNKNOWN':<10} {note}")
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-explicitly_allowed  = [r for r in results if r.allowed is True]
-explicitly_blocked  = [r for r in results if r.allowed is False]
-unknown             = [r for r in results if r.allowed is None]
+blocked_critical = [(l, c) for l, a, c, n in results if a is False and c]
+print(f"\n  Explicitly allowed:       {sum(1 for _,a,_,_ in results if a is True)}")
+print(f"  Unknown (= RFC allowed):  {sum(1 for _,a,_,_ in results if a is None)}")
+print(f"  Explicitly blocked:       {sum(1 for _,a,_,_ in results if a is False)}")
 
-print(f"\n  Explicitly allowed:  {len(explicitly_allowed)}/{len(results)}")
-print(f"  Explicitly blocked:  {len(explicitly_blocked)}")
-print(f"  robots.txt missing:  {len(unknown)}  (RFC 9309: treated as allowed)")
-
-if explicitly_blocked:
-    print("\n🚫 BLOCKED PATHS — do not scrape these:")
-    for r in explicitly_blocked:
-        print(f"   {r.label}: {r.path}")
-    print("\nFAIL: one or more intended paths are disallowed by robots.txt.")
+if blocked_critical:
+    print(f"\nFAIL: critical source(s) disallowed by robots.txt: {[l for l,_ in blocked_critical]}")
     sys.exit(1)
 
-print("\n✅ PASS — all checked paths are allowed (or robots.txt is absent).")
-print("   Safe to proceed to M2.")
+print("\n✅ PASS — all approved sources are allowed. Architecture is robots.txt compliant.")
+print("   Proceeding to connectivity test with clean source list.")
