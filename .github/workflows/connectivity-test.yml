@@ -24,6 +24,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-test.txt
 
+      - name: Run robots.txt compliance check
+        run: python test_robots.py
+
       - name: Run connectivity test
         run: python test_connectivity.py
 
