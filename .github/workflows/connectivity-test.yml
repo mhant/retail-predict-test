@@ -1,0 +1,36 @@
+name: M1 — Source Connectivity Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:       # allows manual trigger from GitHub Actions UI
+  schedule:
+    - cron: '0 9 * * *'   # daily at 09:00 UTC to catch if sources start blocking
+
+jobs:
+  connectivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Run connectivity test
+        run: python test_connectivity.py
+
+      - name: Upload results summary
+        if: always()   # upload even on failure so we can see what failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: connectivity-results-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            test_connectivity.py
