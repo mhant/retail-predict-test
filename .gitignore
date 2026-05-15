@@ -1,0 +1,7 @@
+# Wrangler local cache — contains account metadata, not for version control
+.wrangler/
+
+# Python
+__pycache__/
+*.pyc
+.env
