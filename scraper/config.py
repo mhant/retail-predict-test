@@ -2,8 +2,14 @@
 from __future__ import annotations
 import os
 
-WORKER_URL  = os.environ["WORKER_URL"].rstrip("/")
-WRITE_TOKEN = os.environ["WRITE_TOKEN"]
+WORKER_URL  = os.environ.get("WORKER_URL", "").rstrip("/")
+WRITE_TOKEN = os.environ.get("WRITE_TOKEN", "")
+
+if not WORKER_URL or not WRITE_TOKEN:
+    raise EnvironmentError(
+        "WORKER_URL and WRITE_TOKEN must be set. "
+        "Add them as GitHub Actions secrets (repo Settings → Secrets → Actions)."
+    )
 
 SUBREDDITS = [
     "wallstreetbets",
