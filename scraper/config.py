@@ -25,7 +25,7 @@ SUBREDDITS = [
 POSTS_PER_SUBREDDIT = 25
 
 # Top N mentioned tickers to fetch market data for each run
-TOP_TICKERS_FOR_MARKET_DATA = 30
+TOP_TICKERS_FOR_MARKET_DATA = 50
 
 # Ticker universe — cashtags always trusted; all-caps words checked against this list
 WATCHLIST: frozenset[str] = frozenset([
