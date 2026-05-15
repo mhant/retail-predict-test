@@ -5,3 +5,6 @@
 __pycache__/
 *.pyc
 .env
+
+# Models are committed intentionally (small XGBoost JSON, ~5MB each)
+# Do NOT add models/ here

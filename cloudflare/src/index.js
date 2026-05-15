@@ -91,6 +91,15 @@ const SCHEMA = {
   scraper_events: [
     'event_type', 'ticker', 'detail', 'pipeline_started_at', 'occurred_at',
   ],
+  model_predictions: [
+    'ticker', 'horizon', 'predicted_at', 'signal',
+    'probability_up', 'probability_down', 'confidence', 'feature_ts',
+  ],
+  hype_signals: [
+    'ticker', 'computed_at', 'window_hours', 'signal',
+    'avg_sentiment', 'upvote_weighted_sentiment',
+    'mention_count', 'mention_velocity', 'source_count',
+  ],
 };
 
 // Tables where we REPLACE (upsert) instead of IGNORE on conflict
@@ -227,6 +236,26 @@ export default {
          FROM pipeline_runs ORDER BY started_at DESC LIMIT 20`
       ).all();
       return apiJson({ ok: true, data: results });
+    }
+
+    // GET /api/predictions?ticker=GME
+    if (request.method === 'GET' && path === '/api/predictions') {
+      const ticker = params.get('ticker')
+      if (!ticker) return apiJson({ ok: false, error: 'ticker param required' }, 400)
+      const [modelRows, hyp] = await Promise.all([
+        env.DB.prepare(
+          `SELECT horizon, signal, probability_up, probability_down, confidence, predicted_at
+           FROM model_predictions WHERE ticker = ?1
+           ORDER BY predicted_at DESC LIMIT 3`
+        ).bind(ticker).all(),
+        env.DB.prepare(
+          `SELECT signal, avg_sentiment, upvote_weighted_sentiment, mention_count,
+                  mention_velocity, source_count, computed_at
+           FROM hype_signals WHERE ticker = ?1
+           ORDER BY computed_at DESC LIMIT 1`
+        ).bind(ticker).first(),
+      ])
+      return apiJson({ ok: true, ticker, model: modelRows.results, hype: hyp })
     }
 
     // GET /api/events

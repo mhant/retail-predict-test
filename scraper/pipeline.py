@@ -1,25 +1,32 @@
 """
-M3 scraper pipeline — runs in GitHub Actions on an hourly schedule.
+Scraper pipeline — runs in GitHub Actions on an hourly schedule.
 
 Flow:
   1. PullPush Reddit  → raw_mentions (with VADER scores + upvote data)
-  2. Ticker sentiment → ticker_sentiment_summary (pre-aggregated for fast reads)
-  3. yFinance         → price_snapshots + institutional_data
-  4. CNBC / SA RSS   → news_articles
-  5. SEC EDGAR        → insider_trades
-  6. Record           → pipeline_runs + scraper_events (invalid/delisted tickers)
+  2. Ticker sentiment → ticker_sentiment_summary + hype_signals
+  3. yFinance         → price_snapshots (OHLCV + RSI/MACD/BB indicators)
+                      + institutional_data
+  4. XGBoost          → model_predictions (technical + institutional features)
+  5. CNBC / SA RSS   → news_articles
+  6. SEC EDGAR        → insider_trades
+  7. Record           → pipeline_runs + scraper_events
 """
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sys
 import time
 import warnings
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import feedparser
+import numpy as np
+import pandas as pd
 import requests
+import xgboost as xgb
 import yfinance as yf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -163,6 +170,158 @@ def scrape_reddit() -> list[dict]:
 
 # ── Ticker sentiment summary ───────────────────────────────────────────────────
 
+def compute_hype_signals(mentions: list[dict]) -> list[dict]:
+    """Compute hype buy/sell signals from sentiment data per ticker."""
+    by_ticker: dict[str, list[dict]] = defaultdict(list)
+    for m in mentions:
+        by_ticker[m["ticker"]].append(m)
+
+    signals: list[dict] = []
+    now = time.time()
+
+    for ticker, rows in by_ticker.items():
+        sentiments = [r["vader_compound"] for r in rows if r.get("vader_compound") is not None]
+        if not sentiments:
+            continue
+        scores  = [r["score"] for r in rows]
+        weights = [math.log1p(max(s, 0)) for s in scores]
+        total_w = sum(weights) or 1.0
+        wt_sent = sum(s * w for s, w in zip(sentiments, weights)) / total_w
+        avg_s   = sum(sentiments) / len(sentiments)
+        abs_s   = abs(avg_s)
+
+        if abs_s > 0.5:   sig = "strong_buy"   if avg_s > 0 else "strong_sell"
+        elif abs_s > 0.15: sig = "buy"          if avg_s > 0 else "sell"
+        else:              sig = "neutral"
+
+        signals.append({
+            "ticker":                    ticker,
+            "computed_at":               now,
+            "window_hours":              24,
+            "signal":                    sig,
+            "avg_sentiment":             avg_s,
+            "upvote_weighted_sentiment": wt_sent,
+            "mention_count":             len(rows),
+            "mention_velocity":          len(rows) / 24.0,   # mentions per hour
+            "source_count":              len({r["subreddit"] for r in rows}),
+        })
+
+    return signals
+
+
+# ── XGBoost model inference ────────────────────────────────────────────────────
+
+_MODELS_DIR   = Path(__file__).resolve().parents[1] / "models"
+_FEATURE_COLS = [
+    "mention_count_1h", "mention_count_4h", "mention_count_24h",
+    "mention_velocity_zscore", "vader_compound_mean_1h", "vader_compound_mean_24h",
+    "vader_compound_std_1h", "upvote_weighted_sentiment", "bull_bear_ratio_1h",
+    "finbert_compound_mean", "source_diversity_score", "stocktwits_bull_ratio",
+    "sentiment_momentum", "retail_pressure_score",
+    "institutional_ownership_pct", "short_interest_pct", "short_ratio",
+    "put_call_ratio", "insider_net_signal", "counter_pressure_score", "squeeze_candidate",
+    "rsi_14", "macd_histogram", "bb_position", "volume_ratio_20d",
+    "price_momentum_1d", "price_momentum_5d", "atr_normalized",
+]
+_HORIZONS = {"intraday": "xgb_intraday.json", "short": "xgb_short.json", "medium": "xgb_medium.json"}
+_SIGNAL_MAP = {
+    (True, 0.75): "strong_buy",  (True, 0.60): "buy",
+    (False, 0.25): "strong_sell", (False, 0.40): "sell",
+}
+
+
+def _classify(prob_up: float) -> str:
+    if prob_up >= 0.75: return "strong_buy"
+    if prob_up >= 0.60: return "buy"
+    if prob_up <= 0.25: return "strong_sell"
+    if prob_up <= 0.40: return "sell"
+    return "neutral"
+
+
+def run_model_predictions(
+    price_rows: list[dict],
+    inst_rows:  list[dict],
+) -> list[dict]:
+    """
+    Run XGBoost inference using available technical + institutional features.
+    Social features (Group A) are left as NaN — XGBoost handles these natively.
+    """
+    if not price_rows:
+        return []
+
+    # Latest price bar per ticker
+    by_ticker: dict[str, dict] = {}
+    for row in price_rows:
+        t = row["ticker"]
+        if t not in by_ticker or row["ts"] > by_ticker[t]["ts"]:
+            by_ticker[t] = row
+
+    # Institutional data lookup
+    inst_map = {r["ticker"]: r for r in inst_rows}
+
+    predictions: list[dict] = []
+    now = time.time()
+
+    for horizon, model_file in _HORIZONS.items():
+        model_path = _MODELS_DIR / model_file
+        if not model_path.exists():
+            print(f"  [xgb] {horizon} model not found at {model_path}")
+            continue
+        try:
+            model = xgb.XGBClassifier()
+            model.load_model(str(model_path))
+        except Exception as exc:
+            print(f"  [xgb] failed to load {horizon}: {exc}")
+            continue
+
+        rows_for_model: list[dict] = []
+        tickers_order: list[str]  = []
+
+        for ticker, price in by_ticker.items():
+            inst = inst_map.get(ticker, {})
+            fv = {col: np.nan for col in _FEATURE_COLS}
+            # Group C (technical) — from latest price bar
+            fv["rsi_14"]            = price.get("rsi_14")
+            fv["macd_histogram"]    = price.get("macd_histogram")
+            fv["bb_position"]       = price.get("bb_position")
+            fv["volume_ratio_20d"]  = price.get("volume_ratio_20d")
+            fv["price_momentum_1d"] = price.get("price_momentum_1d")
+            fv["price_momentum_5d"] = price.get("price_momentum_5d")
+            fv["atr_normalized"]    = price.get("atr_normalized")
+            # Group B (institutional)
+            fv["short_interest_pct"]          = inst.get("short_interest_pct")
+            fv["short_ratio"]                 = inst.get("short_ratio")
+            fv["institutional_ownership_pct"] = inst.get("institutional_ownership_pct")
+
+            rows_for_model.append(fv)
+            tickers_order.append(ticker)
+
+        if not rows_for_model:
+            continue
+
+        try:
+            X     = pd.DataFrame(rows_for_model, columns=_FEATURE_COLS).astype(float)
+            proba = model.predict_proba(X)[:, 1]
+
+            for ticker, prob_up in zip(tickers_order, proba):
+                prob_up = float(prob_up)
+                predictions.append({
+                    "ticker":          ticker,
+                    "horizon":         horizon,
+                    "predicted_at":    now,
+                    "signal":          _classify(prob_up),
+                    "probability_up":  prob_up,
+                    "probability_down": 1.0 - prob_up,
+                    "confidence":      abs(prob_up - 0.5) * 2,
+                    "feature_ts":      now,
+                })
+        except Exception as exc:
+            print(f"  [xgb] inference error for {horizon}: {exc}")
+
+    print(f"  [xgb] {len(predictions)} predictions across {len(_HORIZONS)} horizons")
+    return predictions
+
+
 def compute_sentiment_summary(mentions: list[dict]) -> list[dict]:
     """Pre-aggregate sentiment per ticker from this batch (24h window)."""
     by_ticker: dict[str, list[dict]] = defaultdict(list)
@@ -204,12 +363,48 @@ def compute_sentiment_summary(mentions: list[dict]) -> list[dict]:
 
 # ── Market data (yFinance) ─────────────────────────────────────────────────────
 
+def _compute_indicators(hist: pd.DataFrame) -> pd.DataFrame:
+    """Compute RSI(14), MACD, Bollinger Bands(20), volume ratio from OHLCV history."""
+    try:
+        from ta.momentum import RSIIndicator
+        from ta.trend import MACD as MACDIndicator
+        from ta.volatility import BollingerBands
+
+        close  = hist["Close"]
+        volume = hist["Volume"]
+
+        rsi    = RSIIndicator(close=close, window=14).rsi()
+        macd_i = MACDIndicator(close=close)
+        bb     = BollingerBands(close=close, window=20)
+
+        hist = hist.copy()
+        hist["rsi_14"]           = rsi
+        hist["macd"]             = macd_i.macd()
+        hist["macd_signal"]      = macd_i.macd_signal()
+        hist["macd_histogram"]   = macd_i.macd_diff()
+        hist["bb_upper"]         = bb.bollinger_hband()
+        hist["bb_lower"]         = bb.bollinger_lband()
+        hist["bb_position"]      = bb.bollinger_pband()   # 0–1 within band
+
+        vol_ma20 = volume.rolling(20).mean()
+        hist["volume_ratio_20d"] = volume / vol_ma20
+
+        hist["price_momentum_1d"] = close.pct_change(1)
+        hist["price_momentum_5d"] = close.pct_change(5)
+
+        atr = (hist["High"] - hist["Low"]).rolling(14).mean()
+        hist["atr_normalized"] = atr / close
+    except Exception as exc:
+        print(f"  [ta] indicator computation error: {exc}")
+    return hist
+
+
 def fetch_market_data(
     tickers: list[str], pipeline_started_at: float
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
     Returns (price_snapshot_rows, institutional_data_rows, scraper_event_rows).
-    Invalid/delisted tickers are logged to scraper_events instead of printing warnings.
+    Fetches 3 months of history so technical indicators have enough periods.
     """
     price_rows:   list[dict] = []
     inst_rows:    list[dict] = []
@@ -220,7 +415,8 @@ def fetch_market_data(
     for ticker in tickers:
         try:
             t    = yf.Ticker(ticker)
-            hist = t.history(period="7d", interval="1d", auto_adjust=True)
+            # 3 months of daily bars so RSI(14)/MACD/BB(20) have enough history
+            hist = t.history(period="3mo", interval="1d", auto_adjust=True)
 
             if hist.empty:
                 event_rows.append({
@@ -232,16 +428,35 @@ def fetch_market_data(
                 })
                 continue
 
+            hist = _compute_indicators(hist)
+
+            def _safe(row, col):
+                v = row.get(col)
+                if v is None or (isinstance(v, float) and math.isnan(v)):
+                    return None
+                return float(v)
+
             for ts, row in hist.iterrows():
                 price_rows.append({
-                    "ticker":   ticker,
-                    "interval": "1d",
-                    "ts":       ts.timestamp(),
-                    "open":     float(row["Open"])   if row["Open"]   else None,
-                    "high":     float(row["High"])   if row["High"]   else None,
-                    "low":      float(row["Low"])    if row["Low"]    else None,
-                    "close":    float(row["Close"])  if row["Close"]  else None,
-                    "volume":   int(row["Volume"])   if row["Volume"] else None,
+                    "ticker":            ticker,
+                    "interval":          "1d",
+                    "ts":                ts.timestamp(),
+                    "open":              _safe(row, "Open"),
+                    "high":              _safe(row, "High"),
+                    "low":               _safe(row, "Low"),
+                    "close":             _safe(row, "Close"),
+                    "volume":            int(row["Volume"]) if row.get("Volume") else None,
+                    "rsi_14":            _safe(row, "rsi_14"),
+                    "macd":              _safe(row, "macd"),
+                    "macd_signal":       _safe(row, "macd_signal"),
+                    "macd_histogram":    _safe(row, "macd_histogram"),
+                    "bb_upper":          _safe(row, "bb_upper"),
+                    "bb_lower":          _safe(row, "bb_lower"),
+                    "bb_position":       _safe(row, "bb_position"),
+                    "volume_ratio_20d":  _safe(row, "volume_ratio_20d"),
+                    "price_momentum_1d": _safe(row, "price_momentum_1d"),
+                    "price_momentum_5d": _safe(row, "price_momentum_5d"),
+                    "atr_normalized":    _safe(row, "atr_normalized"),
                 })
 
             inst_row: dict = {"ticker": ticker, "report_date": today}
@@ -271,8 +486,7 @@ def fetch_market_data(
 
     print(f"  [yfinance] {len(price_rows)} price rows, {len(inst_rows)} ok, {len(event_rows)} skipped")
     if event_rows:
-        skipped = [e["ticker"] for e in event_rows]
-        print(f"  [yfinance] skipped tickers: {skipped}")
+        print(f"  [yfinance] skipped: {[e['ticker'] for e in event_rows]}")
 
     return price_rows, inst_rows, event_rows
 
@@ -376,10 +590,14 @@ def run() -> None:
         stats["new_mentions"] = result["inserted"]
         print(f"  → {result['inserted']} new, {result['skipped']} dupes")
 
-        print("\n── Computing ticker sentiment summary ──")
+        print("\n── Computing ticker sentiment summary + hype signals ──")
         summaries = compute_sentiment_summary(mentions)
         d1.ingest("ticker_sentiment_summary", summaries, mode="replace")
-        print(f"  → {len(summaries)} ticker summaries written")
+        print(f"  → {len(summaries)} ticker summaries")
+
+        hype_signals = compute_hype_signals(mentions)
+        d1.ingest("hype_signals", hype_signals, mode="replace")
+        print(f"  → {len(hype_signals)} hype signals")
 
         print("\n── Fetching market data (yFinance) ──")
         ticker_counts = Counter(m["ticker"] for m in mentions)
@@ -394,6 +612,12 @@ def run() -> None:
         if event_rows:
             d1.ingest("scraper_events", event_rows)
         stats["prices_updated"] = len(price_rows)
+
+        print("\n── Running XGBoost model predictions ──")
+        model_preds = run_model_predictions(price_rows, inst_rows)
+        if model_preds:
+            d1.ingest("model_predictions", model_preds)
+            stats["predictions_written"] = len(model_preds)
 
         print("\n── Fetching news (CNBC + Seeking Alpha) ──")
         news_rows = fetch_news()
