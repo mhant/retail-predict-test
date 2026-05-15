@@ -2,8 +2,8 @@
 from __future__ import annotations
 import os
 
-WORKER_URL  = os.environ.get("WORKER_URL", "").rstrip("/")
-WRITE_TOKEN = os.environ.get("WRITE_TOKEN", "")
+WORKER_URL  = os.environ.get("WORKER_URL", "").strip().rstrip("/")
+WRITE_TOKEN = os.environ.get("WRITE_TOKEN", "").strip()
 
 if not WORKER_URL or not WRITE_TOKEN:
     raise EnvironmentError(

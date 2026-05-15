@@ -38,6 +38,7 @@ const SCHEMA = {
     'source', 'source_id', 'subreddit', 'ticker', 'title', 'selftext',
     'author', 'score', 'ups', 'upvote_ratio', 'num_comments',
     'url', 'created_utc', 'scraped_utc',
+    'vader_compound', 'vader_positive', 'vader_negative', 'vader_neutral',
   ],
   sentiment_scores: [
     'mention_id', 'analyzer', 'compound', 'positive', 'negative',
