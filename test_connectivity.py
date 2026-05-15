@@ -1,17 +1,18 @@
 """
-M1 Connectivity Test — comprehensive source survey.
+M1 Connectivity Test — comprehensive source survey v3.
 
-Tests every potential data source and prints:
-  - Whether the source is accessible from GitHub Actions
-  - What data fields are available (critical for knowing what we can use)
-  - Sample values so we can judge data quality
+New in this version:
+  - PullPush.io (Pushshift replacement) — Reddit data WITH upvote scores
+  - Arctic Shift — another Reddit archive WITH scores
+  - Google News per-ticker (sample: GME, NVDA, AAPL)
+  - Google News broad topics (wallstreetbets, short squeeze, retail investors)
+  - old.reddit.com JSON (same block check as www)
+  - Reddit i.reddit.com mobile endpoint (different subdomain — might not be blocked)
 
-Reddit RSS field check is especially important — we need to confirm
-whether upvotes/score are accessible without the JSON API.
+Key question: can we get Reddit upvote scores from an unblocked endpoint?
 """
 from __future__ import annotations
 
-import json
 import sys
 import time
 from typing import Any
@@ -19,14 +20,12 @@ from typing import Any
 import feedparser
 import requests
 
-_REDDIT_UA  = "retail-predict/1.0 (open-source research; github.com/mhant/retail-predict-test)"
-_EDGAR_UA   = "retail-predict-research contact@retail-predict-research.com"
-_TIMEOUT    = 20
+_REDDIT_UA = "retail-predict/1.0 (open-source research; github.com/mhant/retail-predict-test)"
+_EDGAR_UA  = "retail-predict-research contact@retail-predict-research.com"
+_TIMEOUT   = 20
 
 results: list[dict] = []
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _tag(status: str) -> str:
     return {"OK": "✅", "BLOCKED": "❌", "RATE_LIMITED": "⚠️",
@@ -53,37 +52,28 @@ def check_rss(name: str, url: str, min_entries: int = 1,
         status_str = "OK" if ok else "EMPTY"
         results.append({"source": name, "status": status_str, "ms": elapsed, "items": count})
         print(f"  {_tag(status_str)} {name}: {count} entries in {elapsed}ms")
-
         if inspect_fields and feed.entries:
             e = feed.entries[0]
-            all_keys = list(vars(e).keys()) if hasattr(e, '__dict__') else dir(e)
             useful = {k: getattr(e, k, None) for k in
                       ["title", "summary", "author", "published", "link", "id",
-                       "score", "ups", "upvotes", "vote_count",
-                       "media_thumbnail", "tags", "content"] if hasattr(e, k)}
-            print(f"     Fields available: {sorted(useful.keys())}")
+                       "score", "ups", "upvotes", "vote_count", "tags", "content"]
+                      if hasattr(e, k)}
+            print(f"     Fields: {sorted(useful.keys())}")
             for field, val in useful.items():
-                preview = str(val)[:80].replace("\n", " ") if val else "—"
+                preview = str(val)[:100].replace("\n", " ") if val else "—"
                 print(f"       {field:20s}: {preview}")
-            # Check for any Reddit-specific namespaced fields
-            extra = [k for k in dir(e) if not k.startswith("_") and k not in
-                     ["title","summary","author","published","link","id","content",
-                      "tags","media_thumbnail","enclosures","authors","links",
-                      "title_detail","summary_detail","author_detail","published_parsed",
-                      "updated","updated_parsed","guidislink"]]
-            if extra:
-                print(f"     Extra fields: {extra}")
         return ok
     except Exception as exc:
         elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": name, "status": "ERROR", "ms": elapsed, "items": 0, "error": str(exc)})
+        results.append({"source": name, "status": "ERROR", "ms": elapsed, "items": 0})
         print(f"  ❌ {name}: {exc} ({elapsed}ms)")
         return False
 
 
-def check_json(name: str, url: str, headers: dict[str, str],
+def check_json(name: str, url: str, headers: dict,
                min_items: int = 1, item_path: list[str] | None = None,
-               count_keys: bool = False, inspect: bool = False) -> bool:
+               count_keys: bool = False, inspect: bool = False,
+               score_fields: list[str] | None = None) -> bool:
     t0 = time.time()
     try:
         resp = requests.get(url, headers=headers, timeout=_TIMEOUT)
@@ -107,247 +97,177 @@ def check_json(name: str, url: str, headers: dict[str, str],
         status_str = "OK" if ok else "EMPTY"
         results.append({"source": name, "status": status_str, "ms": elapsed, "items": count})
         print(f"  {_tag(status_str)} {name}: {count} items in {elapsed}ms")
-        if inspect and isinstance(data, dict):
-            print(f"     Top-level keys: {list(data.keys())[:10]}")
-        elif inspect and isinstance(data, list) and data:
-            print(f"     First item keys: {list(data[0].keys())[:10] if isinstance(data[0], dict) else type(data[0])}")
+        if inspect:
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                print(f"     Fields in first item: {sorted(items[0].keys())}")
+                # Check for upvote-related fields
+                for sf in (score_fields or ["score", "ups", "upvotes", "likes"]):
+                    if sf in items[0]:
+                        print(f"     ✅ UPVOTE FIELD FOUND: '{sf}' = {items[0][sf]}")
+            elif isinstance(items, dict):
+                print(f"     Top-level keys: {list(items.keys())[:8]}")
         return ok
     except Exception as exc:
         elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": name, "status": "ERROR", "ms": elapsed, "items": 0, "error": str(exc)})
+        results.append({"source": name, "status": "ERROR", "ms": elapsed, "items": 0})
         print(f"  ❌ {name}: {exc} ({elapsed}ms)")
         return False
 
 
-_json_headers   = {"User-Agent": _REDDIT_UA, "Accept": "application/json"}
-_edgar_headers  = {"User-Agent": _EDGAR_UA,  "Accept": "application/json"}
-_rss_headers    = {"User-Agent": _REDDIT_UA,  "Accept": "application/rss+xml, application/xml, text/xml"}
+_jh  = {"User-Agent": _REDDIT_UA, "Accept": "application/json"}
+_eh  = {"User-Agent": _EDGAR_UA,  "Accept": "application/json"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# REDDIT
+# REDDIT — can we get upvotes from anywhere?
 # ══════════════════════════════════════════════════════════════════════════════
-print("\n═══ REDDIT ═══")
+print("\n═══ REDDIT — UPVOTE SOURCES ═══")
+print("\n  ── Pushshift / Reddit archives (include scores) ──")
 
-print("\n  ── RSS feeds (workaround) ──")
-reddit_rss_ok = all([
-    check_rss("r/wallstreetbets hot RSS", "https://www.reddit.com/r/wallstreetbets/hot.rss",   min_entries=5, inspect_fields=True),
-    check_rss("r/stocks hot RSS",         "https://www.reddit.com/r/stocks/hot.rss",            min_entries=5),
-    check_rss("r/options hot RSS",        "https://www.reddit.com/r/options/hot.rss",           min_entries=5),
-    check_rss("r/pennystocks hot RSS",    "https://www.reddit.com/r/pennystocks/hot.rss",       min_entries=3),
-    check_rss("r/Superstonk hot RSS",     "https://www.reddit.com/r/Superstonk/hot.rss",        min_entries=3),
-    check_rss("r/investing hot RSS",      "https://www.reddit.com/r/investing/hot.rss",         min_entries=3),
-    check_rss("r/thetagang hot RSS",      "https://www.reddit.com/r/thetagang/hot.rss",         min_entries=3),
-])
+# PullPush.io — a Pushshift.io replacement
+check_json("PullPush.io wallstreetbets",
+           "https://api.pullpush.io/reddit/search/submission/"
+           "?subreddit=wallstreetbets&size=10&sort=score&sort_type=desc",
+           headers=_jh, min_items=1, inspect=True,
+           score_fields=["score", "ups", "upvotes"])
 
-print("\n  ── JSON API (previously blocked — retesting) ──")
-check_json("r/wallstreetbets JSON",
-           "https://www.reddit.com/r/wallstreetbets/hot.json?limit=5&raw_json=1",
-           headers=_json_headers, min_items=1, item_path=["data", "children"], inspect=True)
+check_json("PullPush.io stocks",
+           "https://api.pullpush.io/reddit/search/submission/"
+           "?subreddit=stocks&size=10&sort=score&sort_type=desc",
+           headers=_jh, min_items=1, inspect=False)
+
+# Arctic Shift — another Reddit data archive
+check_json("Arctic Shift wallstreetbets",
+           "https://arctic-shift.quadratic-labs.de/api/posts"
+           "?subreddit=wallstreetbets&limit=10&sort=score",
+           headers=_jh, min_items=1, inspect=True,
+           score_fields=["score", "ups", "upvotes"])
+
+# Reddit mobile endpoint (different subdomain — may not be on blocklist)
+print("\n  ── Reddit alternative subdomains ──")
+check_json("Reddit i.reddit.com (mobile)",
+           "https://i.reddit.com/r/wallstreetbets/hot.json?limit=5&raw_json=1",
+           headers={**_jh, "User-Agent": "Reddit/Version 2024.10.0/iOS"},
+           min_items=1, item_path=["data", "children"], inspect=True,
+           score_fields=["score", "ups"])
+
+check_json("Reddit old.reddit.com",
+           "https://old.reddit.com/r/wallstreetbets/hot.json?limit=5&raw_json=1",
+           headers=_jh, min_items=1, item_path=["data", "children"], inspect=True,
+           score_fields=["score", "ups"])
+
+print("\n  ── Reddit RSS (confirmed working — field check) ──")
+check_rss("r/wallstreetbets hot RSS",
+          "https://www.reddit.com/r/wallstreetbets/hot.rss",
+          min_entries=5, inspect_fields=True)
+check_rss("r/wallstreetbets new RSS",
+          "https://www.reddit.com/r/wallstreetbets/new.rss",
+          min_entries=5)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FINANCIAL NEWS RSS
+# GOOGLE NEWS — per-ticker + broad topics
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n═══ GOOGLE NEWS ═══")
+
+_GN = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
+
+print("\n  ── Per-ticker (sample: top retail-discussed stocks) ──")
+sample_tickers = [("GME", "GameStop"), ("AMC", "AMC"), ("NVDA", "NVIDIA"),
+                  ("TSLA", "Tesla"), ("AAPL", "Apple")]
+ticker_results = {}
+for ticker, name in sample_tickers:
+    ok = check_rss(
+        f"Google News: {ticker}",
+        f"{_GN}{ticker}+stock+buy+sell+short",
+        min_entries=3, inspect_fields=(ticker == "GME"),
+    )
+    ticker_results[ticker] = ok
+
+print("\n  ── Broad topic searches ──")
+check_rss("Google News: wallstreetbets",
+          f"{_GN}wallstreetbets+reddit+stock",
+          min_entries=5)
+check_rss("Google News: short squeeze",
+          f"{_GN}short+squeeze+retail+investors",
+          min_entries=5)
+check_rss("Google News: meme stocks",
+          f"{_GN}meme+stocks+retail+trading",
+          min_entries=3)
+check_rss("Google News: options unusual activity",
+          f"{_GN}unusual+options+activity+stock",
+          min_entries=3)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FINANCIAL NEWS RSS (confirmed from last run)
 # ══════════════════════════════════════════════════════════════════════════════
 print("\n═══ FINANCIAL NEWS RSS ═══")
-
-check_rss("Google News — GME stock",
-          "https://news.google.com/rss/search?q=GME+stock+short+squeeze&hl=en-US&gl=US&ceid=US:en",
-          min_entries=3, inspect_fields=True)
-check_rss("Google News — wallstreetbets",
-          "https://news.google.com/rss/search?q=wallstreetbets+reddit&hl=en-US&gl=US&ceid=US:en",
-          min_entries=3)
-check_rss("Reuters Business RSS",
-          "https://feeds.reuters.com/reuters/businessNews",
-          min_entries=5, inspect_fields=True)
-check_rss("CNBC Markets RSS",
-          "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135",
-          min_entries=3)
-check_rss("Seeking Alpha — Markets",
-          "https://seekingalpha.com/market_currents.xml",
-          min_entries=3)
-check_rss("Benzinga News RSS",
-          "https://www.benzinga.com/feed/",
-          min_entries=3, inspect_fields=True)
-check_rss("MarketWatch RSS",
-          "https://feeds.marketwatch.com/marketwatch/topstories/",
-          min_entries=3)
-check_rss("Motley Fool RSS",
-          "https://www.fool.com/feeds/index.aspx",
-          min_entries=3)
-check_rss("Investopedia News RSS",
-          "https://www.investopedia.com/feedbuilder/feed/getfeed/?feedName=rss_headline",
-          min_entries=3)
+check_rss("CNBC Markets RSS",      "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135", min_entries=3)
+check_rss("MarketWatch RSS",       "https://feeds.marketwatch.com/marketwatch/topstories/", min_entries=3)
+check_rss("Motley Fool RSS",       "https://www.fool.com/feeds/index.aspx",                 min_entries=5)
+check_rss("Seeking Alpha Markets", "https://seekingalpha.com/market_currents.xml",          min_entries=3)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STOCKTWITS + ALTERNATIVES
+# YFINANCE + SEC EDGAR (confirmed — quick recheck)
 # ══════════════════════════════════════════════════════════════════════════════
-print("\n═══ SOCIAL / SENTIMENT SOURCES ═══")
-
-check_json("StockTwits AAPL stream",
-           "https://api.stocktwits.com/api/2/streams/symbol/AAPL.json",
-           headers={**_json_headers, "Referer": "https://stocktwits.com/"},
-           min_items=1, item_path=["messages"])
-
-# Unusual Whales public API (they have some public endpoints)
-check_json("Unusual Whales — flow alerts",
-           "https://phx.unusualwhales.com/api/alerts/options",
-           headers=_json_headers, min_items=1, inspect=True)
-
-# WallStreetMemes RSS or similar
-check_rss("WallStreetBets Discord (none — placeholder)", "", min_entries=1)   # skip
-
-# Substack newsletters
-check_rss("Market Sentiment Substack",
-          "https://marketsentiment.substack.com/feed",
-          min_entries=1, ua=_REDDIT_UA)
-check_rss("Kyla Scanlon Substack",
-          "https://kylascanlon.substack.com/feed",
-          min_entries=1)
-check_rss("The Diff (Byrne Hobart)",
-          "https://www.thediff.co/feed",
-          min_entries=1)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SEC EDGAR
-# ══════════════════════════════════════════════════════════════════════════════
-print("\n═══ SEC EDGAR ═══")
-
-# Company tickers — returns a dict, use count_keys
-check_json("SEC EDGAR company tickers",
-           "https://www.sec.gov/files/company_tickers.json",
-           headers=_edgar_headers, min_items=1000, count_keys=True, inspect=True)
-
-# Form 4 (insider trades) via EDGAR full-text search
-check_json("SEC EDGAR Form 4 search",
-           "https://efts.sec.gov/LATEST/search-index?q=%22form+4%22&forms=4&dateRange=custom&startdt=2025-01-01",
-           headers=_edgar_headers, min_items=1, inspect=True)
-
-# EDGAR RSS feed for Form 4 filings
-check_rss("SEC EDGAR Form 4 RSS",
-          "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&dateb=&owner=include&count=40&search_text=&output=atom",
-          min_entries=5, ua=_EDGAR_UA, inspect_fields=True)
-
-# Company submissions API (AAPL = CIK 0000320193)
-check_json("SEC EDGAR AAPL submissions",
-           "https://data.sec.gov/submissions/CIK0000320193.json",
-           headers=_edgar_headers, min_items=1, inspect=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# YFINANCE (extended)
-# ══════════════════════════════════════════════════════════════════════════════
-print("\n═══ YFINANCE (extended) ═══")
-
+print("\n═══ YFINANCE + SEC EDGAR ═══")
 try:
     import yfinance as yf
-    ticker = yf.Ticker("GME")
-
-    t0 = time.time()
-    price = ticker.fast_info.last_price
-    elapsed = round((time.time() - t0) * 1000)
-    results.append({"source": "yFinance price", "status": "OK", "ms": elapsed, "items": 1})
-    print(f"  ✅ yFinance GME price: ${price:.2f} in {elapsed}ms")
-
-    t0 = time.time()
-    news = ticker.news or []
-    elapsed = round((time.time() - t0) * 1000)
-    ok = len(news) > 0
-    results.append({"source": "yFinance news", "status": "OK" if ok else "EMPTY", "ms": elapsed, "items": len(news)})
-    print(f"  {'✅' if ok else '❌'} yFinance GME news: {len(news)} articles in {elapsed}ms")
-    if news:
-        print(f"     Sample news fields: {list(news[0].keys())}")
-
-    t0 = time.time()
-    try:
-        holders = ticker.institutional_holders
-        count = len(holders) if holders is not None else 0
+    for ticker in ["GME", "NVDA"]:
+        t0 = time.time()
+        p = yf.Ticker(ticker).fast_info.last_price
         elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": "yFinance institutional holders", "status": "OK" if count > 0 else "EMPTY", "ms": elapsed, "items": count})
-        print(f"  {'✅' if count > 0 else '⚠️'} yFinance GME institutional holders: {count} rows in {elapsed}ms")
-    except Exception as exc:
-        elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": "yFinance institutional holders", "status": "ERROR", "ms": elapsed, "items": 0})
-        print(f"  ❌ yFinance institutional holders: {exc}")
-
-    t0 = time.time()
-    try:
-        info = ticker.info
-        short_pct = info.get("shortPercentOfFloat")
-        elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": "yFinance short interest", "status": "OK" if short_pct else "EMPTY", "ms": elapsed, "items": 1})
-        print(f"  {'✅' if short_pct else '⚠️'} yFinance GME short interest: {short_pct} in {elapsed}ms")
-    except Exception as exc:
-        elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": "yFinance short interest", "status": "ERROR", "ms": elapsed, "items": 0})
-        print(f"  ❌ yFinance short interest: {exc}")
-
-    t0 = time.time()
-    try:
-        opts = ticker.options
-        elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": "yFinance options chain", "status": "OK" if opts else "EMPTY", "ms": elapsed, "items": len(opts)})
-        print(f"  {'✅' if opts else '⚠️'} yFinance GME options dates: {len(opts)} expiries in {elapsed}ms")
-    except Exception as exc:
-        elapsed = round((time.time() - t0) * 1000)
-        results.append({"source": "yFinance options chain", "status": "ERROR", "ms": elapsed, "items": 0})
-        print(f"  ❌ yFinance options chain: {exc}")
-
+        results.append({"source": f"yFinance {ticker}", "status": "OK", "ms": elapsed, "items": 1})
+        print(f"  ✅ yFinance {ticker}: ${p:.2f} in {elapsed}ms")
 except Exception as exc:
-    print(f"  ❌ yFinance import failed: {exc}")
+    print(f"  ❌ yFinance: {exc}")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FINRA SHORT INTEREST
-# ══════════════════════════════════════════════════════════════════════════════
-print("\n═══ FINRA / SHORT INTEREST ═══")
-
-check_json("FINRA short interest API",
-           "https://regsho.finra.org/FNRAshortReportCurrentMonthlySummaryJson.json",
-           headers=_json_headers, min_items=1, inspect=True)
-
-check_rss("FINRA news RSS",
-          "https://www.finra.org/rules-guidance/notices/rss",
-          min_entries=1)
+check_rss("SEC EDGAR Form 4 RSS",
+          "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4"
+          "&dateb=&owner=include&count=40&search_text=&output=atom",
+          min_entries=5, ua=_EDGAR_UA)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
 # ══════════════════════════════════════════════════════════════════════════════
-print("\n" + "═" * 60)
+print("\n" + "═" * 64)
 print("SUMMARY")
-print("═" * 60)
-
-total   = len([r for r in results if r["source"] != "WallStreetBets Discord (none — placeholder)"])
-passed  = sum(1 for r in results if r["status"] == "OK")
-blocked = sum(1 for r in results if r["status"] == "BLOCKED")
-limited = sum(1 for r in results if r["status"] == "RATE_LIMITED")
-partial = sum(1 for r in results if r["status"] in ("EMPTY", "PARTIAL"))
-errors  = sum(1 for r in results if r["status"] == "ERROR")
+print("═" * 64)
+real = [r for r in results if r["items"] != 0 or r["status"] != "EMPTY" or "placeholder" not in r["source"]]
+passed  = sum(1 for r in real if r["status"] == "OK")
+blocked = sum(1 for r in real if r["status"] == "BLOCKED")
+limited = sum(1 for r in real if r["status"] == "RATE_LIMITED")
+empty   = sum(1 for r in real if r["status"] == "EMPTY")
+errors  = sum(1 for r in real if r["status"] == "ERROR")
 
 print(f"\n  ✅ Accessible:    {passed}")
 print(f"  ❌ Blocked:       {blocked}")
 print(f"  ⚠️  Rate limited:  {limited}")
-print(f"  🟡 Empty/partial: {partial}")
+print(f"  🟡 Empty:         {empty}")
 print(f"  ❌ Errors:        {errors}")
-print(f"\n  {'Source':<40} {'Status':<14} {'Items':>6}  {'ms':>5}")
-print(f"  {'-'*40} {'-'*14} {'-'*6}  {'-'*5}")
-for r in results:
-    if "placeholder" in r["source"]:
-        continue
-    icon = _tag(r["status"])
-    print(f"  {icon} {r['source']:<40} {r['status']:<14} {r['items']:>6}  {r['ms']:>5}ms")
+print(f"\n  {'Source':<45} {'Status':<14} {'Items':>6}  {'ms':>6}")
+print(f"  {'-'*45} {'-'*14} {'-'*6}  {'-'*6}")
+for r in real:
+    print(f"  {_tag(r['status'])} {r['source']:<45} {r['status']:<14} {r['items']:>6}  {r['ms']:>5}ms")
 
-# Reddit RSS is critical; yFinance is critical
-reddit_ok = any(r["status"] == "OK" and "wallstreetbets" in r["source"].lower() for r in results)
-yf_ok = any(r["status"] == "OK" and "yFinance price" in r["source"] for r in results)
+reddit_rss_ok  = any(r["status"] == "OK" and "wallstreetbets hot RSS" in r["source"] for r in results)
+yfinance_ok    = any(r["status"] == "OK" and "yFinance" in r["source"] for r in results)
+pullpush_ok    = any(r["status"] == "OK" and "PullPush" in r["source"] for r in results)
+arctic_ok      = any(r["status"] == "OK" and "Arctic" in r["source"] for r in results)
+google_news_ok = any(r["status"] == "OK" and "Google News" in r["source"] for r in results)
 
-print()
-if reddit_ok and yf_ok:
-    print("✅ PASS — critical sources (Reddit RSS, yFinance) reachable from GitHub Actions.")
-    print("   Review field availability above before proceeding to M2.")
-else:
-    print("❌ FAIL — critical sources not reachable.")
+print(f"\n  Reddit RSS (no scores):  {'✅' if reddit_rss_ok else '❌'}")
+print(f"  PullPush (with scores):  {'✅ UPVOTES AVAILABLE' if pullpush_ok else '❌ blocked/down'}")
+print(f"  Arctic Shift (scores):   {'✅ UPVOTES AVAILABLE' if arctic_ok else '❌ blocked/down'}")
+print(f"  Google News per-ticker:  {'✅' if google_news_ok else '❌'}")
+print(f"  yFinance:                {'✅' if yfinance_ok else '❌'}")
+
+if not (reddit_rss_ok and yfinance_ok):
+    print("\nFAIL: critical sources not reachable.")
     sys.exit(1)
+
+print("\nPASS — check upvote source results above to decide on weighting strategy.")
+sys.exit(0)
