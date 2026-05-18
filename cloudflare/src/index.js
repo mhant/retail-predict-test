@@ -247,7 +247,7 @@ export default {
     if (request.method === 'GET' && path === '/api/predictions') {
       const ticker = params.get('ticker')
       if (!ticker) return apiJson({ ok: false, error: 'ticker param required' }, 400)
-      const [modelRows, hyp] = await Promise.all([
+      const [modelRows, hyp, histRows] = await Promise.all([
         env.DB.prepare(
           `SELECT horizon, signal, probability_up, probability_down, confidence, predicted_at
            FROM model_predictions WHERE ticker = ?1
@@ -259,8 +259,13 @@ export default {
            FROM hype_signals WHERE ticker = ?1
            ORDER BY computed_at DESC LIMIT 1`
         ).bind(ticker).first(),
+        env.DB.prepare(
+          `SELECT horizon, signal, probability_up, confidence, predicted_at
+           FROM model_predictions WHERE ticker = ?1
+           ORDER BY predicted_at DESC LIMIT 60`
+        ).bind(ticker).all(),
       ])
-      return apiJson({ ok: true, ticker, model: modelRows.results, hype: hyp })
+      return apiJson({ ok: true, ticker, model: modelRows.results, hype: hyp, history: histRows.results })
     }
 
     // GET /api/events
