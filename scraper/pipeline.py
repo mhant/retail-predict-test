@@ -1,5 +1,5 @@
 """
-Scraper pipeline — runs in GitHub Actions on an hourly schedule.
+Scraper pipeline — runs in GitHub Actions twice daily.
 
 Flow:
   1. PullPush Reddit  → raw_mentions (with VADER scores + upvote data)
@@ -20,6 +20,7 @@ import sys
 import time
 import warnings
 from collections import Counter, defaultdict
+from datetime import date, timedelta
 from pathlib import Path
 
 import feedparser
@@ -415,8 +416,9 @@ def fetch_market_data(
     for ticker in tickers:
         try:
             t    = yf.Ticker(ticker)
-            # 3 months of daily bars so RSI(14)/MACD/BB(20) have enough history
-            hist = t.history(period="3mo", interval="1d", auto_adjust=True)
+            start_date = (date.today() - timedelta(days=100)).strftime("%Y-%m-%d")
+            end_date   = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+            hist = t.history(start=start_date, end=end_date, interval="1d", auto_adjust=True)
 
             if hist.empty:
                 event_rows.append({
@@ -604,7 +606,7 @@ def run() -> None:
         top_tickers   = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
         price_rows, inst_rows, event_rows = fetch_market_data(top_tickers, started_at)
 
-        d1.ingest("price_snapshots", price_rows)
+        d1.ingest("price_snapshots", price_rows, mode="replace")
         d1.ingest("institutional_data", [
             r for r in inst_rows
             if any(v for k, v in r.items() if k not in ("ticker", "report_date") and v is not None)
