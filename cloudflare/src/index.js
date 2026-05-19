@@ -193,11 +193,26 @@ export default {
             ORDER BY score DESC LIMIT 1)              AS top_title
          FROM raw_mentions rm
          WHERE scraped_utc >= ?1 AND vader_compound IS NOT NULL
+           AND ticker NOT IN (
+             SELECT ticker FROM scraper_events
+             WHERE event_type IN ('ticker_not_found', 'delisted')
+             GROUP BY ticker HAVING COUNT(*) >= 2
+           )
          GROUP BY ticker
          ORDER BY mention_count DESC
          LIMIT 200`
       ).bind(cutoff).all();
       return apiJson({ ok: true, window_hours: windowHours, data: results });
+    }
+
+    // GET /api/invalid-tickers — tickers with 2+ yfinance failures (used by pipeline)
+    if (request.method === 'GET' && path === '/api/invalid-tickers') {
+      const { results } = await env.DB.prepare(
+        `SELECT ticker FROM scraper_events
+         WHERE event_type IN ('ticker_not_found', 'delisted')
+         GROUP BY ticker HAVING COUNT(*) >= 2`
+      ).all();
+      return apiJson({ ok: true, tickers: results.map(r => r.ticker) });
     }
 
     // GET /api/mentions?ticker=GME

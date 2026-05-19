@@ -15,6 +15,19 @@ _CHUNK_SIZE = 500   # rows per Worker request (well under 5000 limit)
 _MAX_RETRIES = 3
 
 
+def fetch_invalid_tickers() -> frozenset[str]:
+    try:
+        resp = _SESSION.get(
+            f"{WORKER_URL}/api/invalid-tickers",
+            timeout=10,
+        )
+        if resp.ok:
+            return frozenset(resp.json().get("tickers", []))
+    except Exception:
+        pass
+    return frozenset()
+
+
 def ingest(table: str, rows: list[dict], mode: str = "ignore") -> dict:
     """
     Bulk-insert rows into a D1 table via the Worker proxy.

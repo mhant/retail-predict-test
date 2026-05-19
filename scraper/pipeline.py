@@ -582,8 +582,11 @@ def run() -> None:
     error_msg: str | None = None
 
     try:
+        invalid_tickers = d1.fetch_invalid_tickers()
+
         print("\n── Scraping Reddit (PullPush) ──")
         mentions = scrape_reddit()
+        mentions = [m for m in mentions if m["ticker"] not in invalid_tickers]
         stats["subreddits_scraped"] = len(config.SUBREDDITS)
         stats["mentions_scraped"]   = len(mentions)
         stats["vader_scored"]       = len(mentions)
