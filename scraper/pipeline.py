@@ -19,8 +19,9 @@ import re
 import sys
 import time
 import warnings
+import calendar
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import feedparser
@@ -195,6 +196,70 @@ def scrape_reddit() -> list[dict]:
 
 
 # ── Ticker sentiment summary ───────────────────────────────────────────────────
+
+def _parse_iso(s: str, default: float) -> float:
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return default
+
+
+def fetch_stocktwits() -> list[dict]:
+    """Fetch trending messages from StockTwits public API (no auth required)."""
+    rows: list[dict] = []
+    now = time.time()
+
+    endpoints = [
+        ("trending", "https://api.stocktwits.com/api/2/streams/trending.json"),
+        ("all",      "https://api.stocktwits.com/api/2/streams/all.json"),
+    ]
+
+    for label, url in endpoints:
+        try:
+            resp = _session.get(url, timeout=15, headers={"User-Agent": _REDDIT_UA})
+            resp.raise_for_status()
+            messages = resp.json().get("messages", [])
+            for msg in messages:
+                body    = msg.get("body", "")
+                symbols = [s["symbol"] for s in msg.get("symbols", []) if s.get("symbol")]
+                if not symbols:
+                    symbols = extract_tickers(body)
+                if not symbols:
+                    continue
+                scores   = _vader.polarity_scores(body[:2000])
+                st_sent  = (msg.get("entities") or {}).get("sentiment", {})
+                basic    = st_sent.get("basic") if isinstance(st_sent, dict) else None
+                upvote   = 1.0 if basic == "Bullish" else (0.0 if basic == "Bearish" else 0.5)
+                created  = _parse_iso(msg.get("created_at", ""), now)
+                msg_id   = str(msg.get("id", ""))
+                for ticker in symbols[:3]:
+                    rows.append({
+                        "source":         "stocktwits",
+                        "source_id":      msg_id,
+                        "subreddit":      f"stocktwits_{label}",
+                        "ticker":         ticker,
+                        "title":          body[:500],
+                        "selftext":       "",
+                        "author":         (msg.get("user") or {}).get("username", ""),
+                        "score":          (msg.get("likes") or {}).get("total", 0),
+                        "ups":            0,
+                        "upvote_ratio":   upvote,
+                        "num_comments":   0,
+                        "url":            f"https://stocktwits.com/message/{msg_id}",
+                        "created_utc":    created,
+                        "scraped_utc":    now,
+                        "vader_compound": scores["compound"],
+                        "vader_positive": scores["pos"],
+                        "vader_negative": scores["neg"],
+                        "vader_neutral":  scores["neu"],
+                    })
+            print(f"  [stocktwits] {label}: {len(messages)} messages")
+            time.sleep(1.0)
+        except Exception as exc:
+            print(f"  [stocktwits] {label}: {exc}")
+
+    return rows
+
 
 def compute_hype_signals(mentions: list[dict]) -> list[dict]:
     """Compute hype buy/sell signals from sentiment data per ticker."""
@@ -518,35 +583,87 @@ def fetch_market_data(
     return price_rows, inst_rows, event_rows
 
 
+def fetch_yfinance_news(tickers: list[str]) -> list[dict]:
+    """Fetch per-ticker news articles from yfinance (10 articles per tracked ticker)."""
+    rows: list[dict] = []
+    now  = time.time()
+    seen: set[str] = set()
+
+    for ticker in tickers:
+        try:
+            news_items = yf.Ticker(ticker).news or []
+            for item in news_items:
+                content    = item.get("content", {})
+                article_id = content.get("id") or item.get("id", "")
+                if not article_id or article_id in seen:
+                    continue
+                seen.add(article_id)
+                title      = content.get("title", "")
+                url        = (content.get("canonicalUrl") or {}).get("url", "")
+                pub_str    = content.get("pubDate", "")
+                published  = _parse_iso(pub_str, now) if pub_str else now
+                tickers_in = [ticker] + [
+                    (s.get("symbol") or "") for s in (content.get("relatedTickers") or [])
+                ]
+                tickers_in = [t for t in tickers_in if t]
+                rows.append({
+                    "source":        "yfinance_news",
+                    "article_id":    str(article_id)[:200],
+                    "ticker":        ticker,
+                    "title":         title[:400],
+                    "summary":       content.get("summary", "")[:500],
+                    "url":           url[:500],
+                    "published_utc": published,
+                    "scraped_utc":   now,
+                })
+            time.sleep(0.1)
+        except Exception as exc:
+            print(f"  [yfinance news] {ticker}: {exc}")
+
+    print(f"  [yfinance news] {len(rows)} articles across {len(tickers)} tickers")
+    return rows
+
+
 # ── News RSS (CNBC + Seeking Alpha) ───────────────────────────────────────────
 
 def fetch_news() -> list[dict]:
-    """Fetch news from allowed RSS sources."""
+    """Fetch articles from financial RSS feeds."""
     news_rows: list[dict] = []
     now = time.time()
 
     sources = [
         ("cnbc",          "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135"),
+        ("cnbc_finance",  "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
         ("seeking_alpha", "https://seekingalpha.com/market_currents.xml"),
+        ("seeking_alpha_analysis", "https://seekingalpha.com/feed.xml"),
+        ("reuters",       "https://feeds.reuters.com/reuters/businessNews"),
+        ("reuters_tech",  "https://feeds.reuters.com/reuters/technologyNews"),
+        ("yahoo_finance", "https://finance.yahoo.com/news/rssindex"),
+        ("marketwatch",   "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+        ("benzinga",      "https://www.benzinga.com/feed"),
+        ("motley_fool",   "https://www.fool.com/feeds/index.aspx"),
     ]
 
     for source, url in sources:
         try:
             feed = feedparser.parse(url, agent=_BOT_UA, request_headers={"User-Agent": _BOT_UA})
+            if not feed.entries:
+                continue
             for entry in feed.entries:
-                article_id = getattr(entry, "id", getattr(entry, "link", ""))
-                title      = getattr(entry, "title", "")
-                # Try to extract a ticker from the headline
-                tickers = extract_tickers(title)
+                article_id  = getattr(entry, "id", getattr(entry, "link", ""))
+                title       = getattr(entry, "title", "")
+                tickers     = extract_tickers(title)
+                pub         = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+                published   = calendar.timegm(pub) if pub else now
                 news_rows.append({
-                    "source":       source,
-                    "article_id":   article_id[:200],
-                    "ticker":       tickers[0] if tickers else None,
-                    "title":        title[:400],
-                    "summary":      getattr(entry, "summary", "")[:500],
-                    "url":          getattr(entry, "link", "")[:500],
-                    "published_utc": now,
-                    "scraped_utc":  now,
+                    "source":        source,
+                    "article_id":    article_id[:200],
+                    "ticker":        tickers[0] if tickers else None,
+                    "title":         title[:400],
+                    "summary":       getattr(entry, "summary", "")[:500],
+                    "url":           getattr(entry, "link", "")[:500],
+                    "published_utc": published,
+                    "scraped_utc":   now,
                 })
             print(f"  [news] {source}: {len(feed.entries)} articles")
         except Exception as exc:
@@ -609,9 +726,13 @@ def run() -> None:
     try:
         invalid_tickers = d1.fetch_invalid_tickers()
 
-        print("\n── Scraping Reddit (PullPush) ──")
+        print("\n── Scraping Reddit ──")
         mentions = scrape_reddit()
-        mentions = [m for m in mentions if m["ticker"] not in invalid_tickers]
+
+        print("\n── Scraping StockTwits ──")
+        st_mentions = fetch_stocktwits()
+        mentions = [m for m in (mentions + st_mentions) if m["ticker"] not in invalid_tickers]
+
         stats["subreddits_scraped"] = len(config.SUBREDDITS)
         stats["mentions_scraped"]   = len(mentions)
         stats["vader_scored"]       = len(mentions)
@@ -654,9 +775,10 @@ def run() -> None:
             d1.ingest("model_predictions", model_preds)
             stats["predictions_written"] = len(model_preds)
 
-        print("\n── Fetching news (CNBC + Seeking Alpha) ──")
+        print("\n── Fetching news (RSS + yFinance) ──")
         news_rows = fetch_news()
-        d1.ingest("news_articles", news_rows)
+        yf_news   = fetch_yfinance_news(top_tickers[:50])
+        d1.ingest("news_articles", news_rows + yf_news)
 
         print("\n── Fetching insider trades (SEC EDGAR Form 4) ──")
         insider_rows = fetch_insider_trades()

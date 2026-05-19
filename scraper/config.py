@@ -19,10 +19,18 @@ SUBREDDITS = [
     "Superstonk",
     "investing",
     "thetagang",
+    "StockMarket",
+    "ValueInvesting",
+    "SecurityAnalysis",
+    "algotrading",
+    "dividends",
+    "Daytrading",
+    "smallstreetbets",
 ]
 
 # How many posts to fetch per subreddit per sort order
-POSTS_PER_SUBREDDIT = 25
+# VADER runs in microseconds — this is not the bottleneck; Reddit rate limits are.
+POSTS_PER_SUBREDDIT = 50
 
 # Top N from current run's mentions — always get price data
 TOP_TICKERS_FOR_MARKET_DATA = 50
