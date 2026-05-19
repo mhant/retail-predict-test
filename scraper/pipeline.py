@@ -630,8 +630,13 @@ def run() -> None:
         print(f"  → {len(hype_signals)} hype signals")
 
         print("\n── Fetching market data (yFinance) ──")
-        ticker_counts = Counter(m["ticker"] for m in mentions)
-        top_tickers   = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
+        ticker_counts     = Counter(m["ticker"] for m in mentions)
+        current_top       = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
+        historical        = d1.fetch_tracked_tickers()
+        current_set       = set(current_top)
+        extra             = [t for t in historical if t not in current_set]
+        top_tickers       = (current_top + extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
+        print(f"  tracking {len(top_tickers)} tickers ({len(current_top)} current + {len(extra)} historical)")
         price_rows, inst_rows, event_rows = fetch_market_data(top_tickers, started_at)
 
         d1.ingest("price_snapshots", price_rows, mode="replace")

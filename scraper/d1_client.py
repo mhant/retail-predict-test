@@ -15,6 +15,16 @@ _CHUNK_SIZE = 500   # rows per Worker request (well under 5000 limit)
 _MAX_RETRIES = 3
 
 
+def fetch_tracked_tickers() -> frozenset[str]:
+    try:
+        resp = _SESSION.get(f"{WORKER_URL}/api/tracked-tickers", timeout=10)
+        if resp.ok:
+            return frozenset(resp.json().get("tickers", []))
+    except Exception:
+        pass
+    return frozenset()
+
+
 def fetch_invalid_tickers() -> frozenset[str]:
     try:
         resp = _SESSION.get(

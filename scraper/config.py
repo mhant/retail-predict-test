@@ -24,8 +24,11 @@ SUBREDDITS = [
 # How many posts to fetch per subreddit per sort order
 POSTS_PER_SUBREDDIT = 25
 
-# Top N mentioned tickers to fetch market data for each run
+# Top N from current run's mentions — always get price data
 TOP_TICKERS_FOR_MARKET_DATA = 50
+
+# Hard cap on total tickers tracked (current + historical ever-mentioned)
+MAX_TICKERS_FOR_MARKET_DATA = 200
 
 # Ticker universe — cashtags always trusted; all-caps words checked against this list
 WATCHLIST: frozenset[str] = frozenset([

@@ -205,6 +205,29 @@ export default {
       return apiJson({ ok: true, window_hours: windowHours, data: results });
     }
 
+    // GET /api/tracked-tickers — all tickers ever mentioned, minus confirmed-delisted
+    if (request.method === 'GET' && path === '/api/tracked-tickers') {
+      const { results } = await env.DB.prepare(
+        `SELECT DISTINCT ticker FROM raw_mentions
+         WHERE ticker IS NOT NULL
+           AND ticker NOT IN (
+             SELECT ticker FROM scraper_events
+             WHERE event_type IN ('ticker_not_found', 'delisted')
+             GROUP BY ticker HAVING COUNT(*) >= 2
+           )
+         UNION
+         SELECT DISTINCT ticker FROM hype_signals
+         WHERE ticker IS NOT NULL
+           AND ticker NOT IN (
+             SELECT ticker FROM scraper_events
+             WHERE event_type IN ('ticker_not_found', 'delisted')
+             GROUP BY ticker HAVING COUNT(*) >= 2
+           )
+         ORDER BY ticker`
+      ).all();
+      return apiJson({ ok: true, tickers: results.map(r => r.ticker) });
+    }
+
     // GET /api/invalid-tickers — tickers with 2+ yfinance failures (used by pipeline)
     if (request.method === 'GET' && path === '/api/invalid-tickers') {
       const { results } = await env.DB.prepare(
