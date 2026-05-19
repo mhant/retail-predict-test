@@ -97,13 +97,29 @@ def extract_tickers(text: str) -> list[str]:
     return [s for s, _ in sorted(found.items(), key=lambda x: x[1])]
 
 
-# ── PullPush scraper ───────────────────────────────────────────────────────────
+# ── Reddit scrapers ────────────────────────────────────────────────────────────
 
-def _fetch_pullpush(subreddit: str, sort: str, size: int = 25, after: int | None = None) -> list[dict]:
+_REDDIT_UA = "retail-predict-bot/1.0 (by /u/retail_predict_bot)"
+
+def _fetch_reddit_json(subreddit: str, sort: str = "new", limit: int = 25) -> list[dict]:
+    """Fetch posts from Reddit's public JSON API (no auth, truly real-time)."""
+    url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}"
+    try:
+        resp = _session.get(url, timeout=15,
+                            headers={"User-Agent": _REDDIT_UA, "Accept": "application/json"})
+        resp.raise_for_status()
+        children = resp.json().get("data", {}).get("children", [])
+        return [c["data"] for c in children]
+    except Exception as exc:
+        print(f"  [reddit.json] {subreddit}/{sort}: {exc}")
+        return []
+
+
+def _fetch_pullpush(subreddit: str, sort: str = "created_utc", size: int = 25) -> list[dict]:
+    """Fetch posts from PullPush archive (has upvote scores, slight delay)."""
     url = (
         f"https://api.pullpush.io/reddit/search/submission/"
         f"?subreddit={subreddit}&size={size}&sort={sort}&sort_type=desc"
-        + (f"&after={after}" if after else "")
     )
     try:
         resp = _session.get(url, timeout=20)
@@ -114,49 +130,58 @@ def _fetch_pullpush(subreddit: str, sort: str, size: int = 25, after: int | None
         return []
 
 
+def _posts_to_mentions(posts: list[dict], source: str, now: float) -> list[dict]:
+    rows = []
+    for post in posts:
+        full_text = f"{post.get('title', '')} {post.get('selftext', '')}".strip()
+        tickers = extract_tickers(full_text)
+        if not tickers:
+            continue
+        scores = _vader.polarity_scores(full_text[:2000])
+        permalink = post.get("permalink", "")
+        url = f"https://reddit.com{permalink}" if permalink.startswith("/") else post.get("url", "")
+        for ticker in tickers:
+            rows.append({
+                "source":         source,
+                "source_id":      post.get("id", ""),
+                "subreddit":      post.get("subreddit", ""),
+                "ticker":         ticker,
+                "title":          post.get("title", "")[:500],
+                "selftext":       post.get("selftext", "")[:2000],
+                "author":         post.get("author", ""),
+                "score":          int(post.get("score", 0)),
+                "ups":            int(post.get("ups", 0)),
+                "upvote_ratio":   float(post.get("upvote_ratio", 0)),
+                "num_comments":   int(post.get("num_comments", 0)),
+                "url":            url,
+                "created_utc":    float(post.get("created_utc", now)),
+                "scraped_utc":    now,
+                "vader_compound": scores["compound"],
+                "vader_positive": scores["pos"],
+                "vader_negative": scores["neg"],
+                "vader_neutral":  scores["neu"],
+            })
+    return rows
+
+
 def scrape_reddit() -> list[dict]:
-    now   = time.time()
-    after = int(now - 48 * 3600)
+    now = time.time()
     mention_rows: list[dict] = []
 
     for sub in config.SUBREDDITS:
-        for sort in ("score", "created_utc"):
-            posts = _fetch_pullpush(sub, sort, config.POSTS_PER_SUBREDDIT, after=after)
-            time.sleep(0.4)
+        # Primary: Reddit public JSON for truly fresh posts (new + hot)
+        for sort in ("new", "hot"):
+            posts = _fetch_reddit_json(sub, sort, config.POSTS_PER_SUBREDDIT)
+            mention_rows.extend(_posts_to_mentions(posts, "reddit", now))
+            time.sleep(1.0)
 
-            for post in posts:
-                full_text = f"{post.get('title', '')} {post.get('selftext', '')}".strip()
-                tickers = extract_tickers(full_text)
-                if not tickers:
-                    continue
+        # Supplementary: PullPush for upvote scores on recent posts
+        pp_posts = _fetch_pullpush(sub, "created_utc", config.POSTS_PER_SUBREDDIT)
+        mention_rows.extend(_posts_to_mentions(pp_posts, "pullpush_reddit", now))
+        time.sleep(0.5)
 
-                scores = _vader.polarity_scores(full_text[:2000])
+        print(f"  [reddit] {sub}: scraped")
 
-                for ticker in tickers:
-                    mention_rows.append({
-                        "source":        "pullpush_reddit",
-                        "source_id":     post.get("id", ""),
-                        "subreddit":     sub,
-                        "ticker":        ticker,
-                        "title":         post.get("title", "")[:500],
-                        "selftext":      post.get("selftext", "")[:2000],
-                        "author":        post.get("author", ""),
-                        "score":         int(post.get("score", 0)),
-                        "ups":           int(post.get("ups", 0)),
-                        "upvote_ratio":  float(post.get("upvote_ratio", 0)),
-                        "num_comments":  int(post.get("num_comments", 0)),
-                        "url":           f"https://reddit.com{post.get('permalink', '')}",
-                        "created_utc":   float(post.get("created_utc", now)),
-                        "scraped_utc":   now,
-                        "vader_compound": scores["compound"],
-                        "vader_positive": scores["pos"],
-                        "vader_negative": scores["neg"],
-                        "vader_neutral":  scores["neu"],
-                    })
-
-        print(f"  [reddit] {sub}: scraped both sorts")
-
-    # Deduplicate by (source_id, ticker) — Worker uses INSERT OR IGNORE but cheaper to dedup first
     seen: set[tuple] = set()
     unique: list[dict] = []
     for row in mention_rows:

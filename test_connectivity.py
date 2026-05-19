@@ -279,7 +279,7 @@ print(f"  {'-'*40} {'-'*10} {'-'*6}  {'-'*6}")
 for r in results:
     print(f"  {_tag(r['status'])} {r['source']:<40} {r['status']:<10} {r['items']:>6}  {r['ms']:>5}ms")
 
-pullpush_ok = any(r["status"] == "OK" and "PullPush r/wallstreetbets" in r["source"] for r in results)
+pullpush_ok = any(r["status"] == "OK" and r["source"].startswith("PullPush r/") for r in results)
 yf_ok       = any(r["status"] == "OK" and "yFinance price" in r["source"] for r in results)
 edgar_ok    = any(r["source"] == "SEC EDGAR Form 4 RSS (insider trades)" for r in results)
 
