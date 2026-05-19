@@ -99,11 +99,11 @@ def extract_tickers(text: str) -> list[str]:
 
 # ── PullPush scraper ───────────────────────────────────────────────────────────
 
-def _fetch_pullpush(subreddit: str, sort: str, size: int = 25) -> list[dict]:
-    """Fetch posts from PullPush Reddit archive."""
+def _fetch_pullpush(subreddit: str, sort: str, size: int = 25, after: int | None = None) -> list[dict]:
     url = (
         f"https://api.pullpush.io/reddit/search/submission/"
         f"?subreddit={subreddit}&size={size}&sort={sort}&sort_type=desc"
+        + (f"&after={after}" if after else "")
     )
     try:
         resp = _session.get(url, timeout=20)
@@ -115,14 +115,14 @@ def _fetch_pullpush(subreddit: str, sort: str, size: int = 25) -> list[dict]:
 
 
 def scrape_reddit() -> list[dict]:
-    """Scrape all subreddits (top-scored + most-recent). Returns mention rows ready for D1."""
-    now = time.time()
+    now   = time.time()
+    after = int(now - 48 * 3600)
     mention_rows: list[dict] = []
 
     for sub in config.SUBREDDITS:
         for sort in ("score", "created_utc"):
-            posts = _fetch_pullpush(sub, sort, config.POSTS_PER_SUBREDDIT)
-            time.sleep(0.4)   # polite delay
+            posts = _fetch_pullpush(sub, sort, config.POSTS_PER_SUBREDDIT, after=after)
+            time.sleep(0.4)
 
             for post in posts:
                 full_text = f"{post.get('title', '')} {post.get('selftext', '')}".strip()
