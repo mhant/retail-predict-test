@@ -102,32 +102,21 @@ def extract_tickers(text: str) -> list[str]:
 
 _REDDIT_UA = "retail-predict-bot/1.0 (by /u/retail_predict_bot)"
 
-def _fetch_reddit_json(subreddit: str, sort: str = "new", limit: int = 25) -> list[dict]:
-    """Fetch posts from Reddit's public JSON API (no auth, truly real-time)."""
-    url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}"
-    try:
-        resp = _session.get(url, timeout=15,
-                            headers={"User-Agent": _REDDIT_UA, "Accept": "application/json"})
-        resp.raise_for_status()
-        children = resp.json().get("data", {}).get("children", [])
-        return [c["data"] for c in children]
-    except Exception as exc:
-        print(f"  [reddit.json] {subreddit}/{sort}: {exc}")
-        return []
 
-
-def _fetch_pullpush(subreddit: str, sort: str = "created_utc", size: int = 25) -> list[dict]:
-    """Fetch posts from PullPush archive (has upvote scores, slight delay)."""
+def _fetch_pullpush(subreddit: str, size: int = 25, after: int | None = None) -> list[dict]:
+    """Fetch posts from PullPush archive sorted by newest first, optionally after a timestamp."""
     url = (
         f"https://api.pullpush.io/reddit/search/submission/"
-        f"?subreddit={subreddit}&size={size}&sort={sort}&sort_type=desc"
+        f"?subreddit={subreddit}&size={size}&sort=created_utc&sort_type=desc"
     )
+    if after:
+        url += f"&after={after}"
     try:
         resp = _session.get(url, timeout=20)
         resp.raise_for_status()
         return resp.json().get("data", [])
     except Exception as exc:
-        print(f"  [pullpush] {subreddit}/{sort}: {exc}")
+        print(f"  [pullpush] {subreddit}: {exc}")
         return []
 
 
@@ -167,21 +156,14 @@ def _posts_to_mentions(posts: list[dict], source: str, now: float) -> list[dict]
 
 def scrape_reddit() -> list[dict]:
     now = time.time()
+    after_ts = int(now - 14 * 3600)  # only posts from the last 14h — covers twice-daily gap
     mention_rows: list[dict] = []
 
     for sub in config.SUBREDDITS:
-        # Primary: Reddit public JSON for truly fresh posts (new + hot)
-        for sort in ("new", "hot"):
-            posts = _fetch_reddit_json(sub, sort, config.POSTS_PER_SUBREDDIT)
-            mention_rows.extend(_posts_to_mentions(posts, "reddit", now))
-            time.sleep(1.0)
-
-        # Supplementary: PullPush for upvote scores on recent posts
-        pp_posts = _fetch_pullpush(sub, "created_utc", config.POSTS_PER_SUBREDDIT)
+        pp_posts = _fetch_pullpush(sub, config.POSTS_PER_SUBREDDIT, after=after_ts)
         mention_rows.extend(_posts_to_mentions(pp_posts, "pullpush_reddit", now))
         time.sleep(0.5)
-
-        print(f"  [reddit] {sub}: scraped")
+        print(f"  [reddit] {sub}: {len(pp_posts)} posts")
 
     seen: set[tuple] = set()
     unique: list[dict] = []
@@ -204,48 +186,99 @@ def _parse_iso(s: str, default: float) -> float:
         return default
 
 
-def fetch_stocktwits() -> list[dict]:
-    """Fetch trending messages from StockTwits public API (no auth required)."""
+def fetch_stocktwits(tickers: list[str]) -> list[dict]:
+    """Fetch per-symbol streams from StockTwits (less rate-limited than bulk endpoints)."""
     rows: list[dict] = []
-    now = time.time()
+    now  = time.time()
+    seen: set[str] = set()
 
-    endpoints = [
-        ("trending", "https://api.stocktwits.com/api/2/streams/trending.json"),
-        ("all",      "https://api.stocktwits.com/api/2/streams/all.json"),
-    ]
-
-    for label, url in endpoints:
+    for ticker in tickers[:40]:
         try:
+            url  = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
             resp = _session.get(url, timeout=15, headers={"User-Agent": _REDDIT_UA})
             resp.raise_for_status()
             messages = resp.json().get("messages", [])
             for msg in messages:
-                body    = msg.get("body", "")
-                symbols = [s["symbol"] for s in msg.get("symbols", []) if s.get("symbol")]
-                if not symbols:
-                    symbols = extract_tickers(body)
-                if not symbols:
+                msg_id = str(msg.get("id", ""))
+                if msg_id in seen:
                     continue
-                scores   = _vader.polarity_scores(body[:2000])
+                seen.add(msg_id)
+                body     = msg.get("body", "")
                 st_sent  = (msg.get("entities") or {}).get("sentiment", {})
                 basic    = st_sent.get("basic") if isinstance(st_sent, dict) else None
                 upvote   = 1.0 if basic == "Bullish" else (0.0 if basic == "Bearish" else 0.5)
+                scores   = _vader.polarity_scores(body[:2000])
                 created  = _parse_iso(msg.get("created_at", ""), now)
-                msg_id   = str(msg.get("id", ""))
-                for ticker in symbols[:3]:
+                rows.append({
+                    "source":         "stocktwits",
+                    "source_id":      msg_id,
+                    "subreddit":      "stocktwits",
+                    "ticker":         ticker,
+                    "title":          body[:500],
+                    "selftext":       "",
+                    "author":         (msg.get("user") or {}).get("username", ""),
+                    "score":          (msg.get("likes") or {}).get("total", 0),
+                    "ups":            0,
+                    "upvote_ratio":   upvote,
+                    "num_comments":   0,
+                    "url":            f"https://stocktwits.com/message/{msg_id}",
+                    "created_utc":    created,
+                    "scraped_utc":    now,
+                    "vader_compound": scores["compound"],
+                    "vader_positive": scores["pos"],
+                    "vader_negative": scores["neg"],
+                    "vader_neutral":  scores["neu"],
+                })
+            time.sleep(0.5)
+        except Exception as exc:
+            print(f"  [stocktwits] {ticker}: {exc}")
+
+    print(f"  [stocktwits] {len(rows)} messages across {len(tickers[:40])} tickers")
+    return rows
+
+
+_MASTODON_TAGS = ["investing", "stocks", "wallstreetbets", "stockmarket", "options"]
+
+
+def fetch_mastodon() -> list[dict]:
+    """Fetch finance hashtag timelines from Mastodon (public API, no auth)."""
+    rows: list[dict] = []
+    now  = time.time()
+    seen: set[str] = set()
+
+    for tag in _MASTODON_TAGS:
+        try:
+            url  = f"https://mastodon.social/api/v1/timelines/tag/{tag}?limit=40"
+            resp = _session.get(url, timeout=15, headers={"User-Agent": _BOT_UA})
+            resp.raise_for_status()
+            for status in resp.json():
+                sid = str(status.get("id", ""))
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                text = re.sub(r"<[^>]+>", " ", status.get("content", "")).strip()
+                if not text:
+                    continue
+                tickers = extract_tickers(text)
+                if not tickers:
+                    continue
+                scores  = _vader.polarity_scores(text[:2000])
+                created = _parse_iso(status.get("created_at", ""), now)
+                acct    = (status.get("account") or {}).get("username", "")
+                for ticker in tickers:
                     rows.append({
-                        "source":         "stocktwits",
-                        "source_id":      msg_id,
-                        "subreddit":      f"stocktwits_{label}",
+                        "source":         "mastodon",
+                        "source_id":      sid,
+                        "subreddit":      f"mastodon_{tag}",
                         "ticker":         ticker,
-                        "title":          body[:500],
+                        "title":          text[:500],
                         "selftext":       "",
-                        "author":         (msg.get("user") or {}).get("username", ""),
-                        "score":          (msg.get("likes") or {}).get("total", 0),
+                        "author":         acct,
+                        "score":          status.get("favourites_count", 0),
                         "ups":            0,
-                        "upvote_ratio":   upvote,
-                        "num_comments":   0,
-                        "url":            f"https://stocktwits.com/message/{msg_id}",
+                        "upvote_ratio":   0.5,
+                        "num_comments":   status.get("replies_count", 0),
+                        "url":            status.get("url", ""),
                         "created_utc":    created,
                         "scraped_utc":    now,
                         "vader_compound": scores["compound"],
@@ -253,11 +286,64 @@ def fetch_stocktwits() -> list[dict]:
                         "vader_negative": scores["neg"],
                         "vader_neutral":  scores["neu"],
                     })
-            print(f"  [stocktwits] {label}: {len(messages)} messages")
             time.sleep(1.0)
         except Exception as exc:
-            print(f"  [stocktwits] {label}: {exc}")
+            print(f"  [mastodon] {tag}: {exc}")
 
+    print(f"  [mastodon] {len(rows)} posts")
+    return rows
+
+
+def fetch_bluesky(tickers: list[str]) -> list[dict]:
+    """Search Bluesky for cashtag mentions (public API, no auth required)."""
+    rows: list[dict] = []
+    now  = time.time()
+    seen: set[str] = set()
+
+    for ticker in tickers[:30]:
+        try:
+            url  = f"https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=%24{ticker}&limit=25"
+            resp = _session.get(url, timeout=15, headers={"User-Agent": _BOT_UA})
+            resp.raise_for_status()
+            for post in resp.json().get("posts", []):
+                uri = post.get("uri", "")
+                if uri in seen:
+                    continue
+                seen.add(uri)
+                record  = post.get("record", {})
+                text    = record.get("text", "")
+                if not text:
+                    continue
+                author  = post.get("author", {})
+                handle  = author.get("handle", "")
+                post_id = uri.split("/")[-1]
+                created = _parse_iso(record.get("createdAt", ""), now)
+                scores  = _vader.polarity_scores(text[:2000])
+                rows.append({
+                    "source":         "bluesky",
+                    "source_id":      uri[:200],
+                    "subreddit":      "bluesky",
+                    "ticker":         ticker,
+                    "title":          text[:500],
+                    "selftext":       "",
+                    "author":         handle,
+                    "score":          post.get("likeCount", 0),
+                    "ups":            0,
+                    "upvote_ratio":   0.5,
+                    "num_comments":   post.get("replyCount", 0),
+                    "url":            f"https://bsky.app/profile/{handle}/post/{post_id}",
+                    "created_utc":    created,
+                    "scraped_utc":    now,
+                    "vader_compound": scores["compound"],
+                    "vader_positive": scores["pos"],
+                    "vader_negative": scores["neg"],
+                    "vader_neutral":  scores["neu"],
+                })
+            time.sleep(0.3)
+        except Exception as exc:
+            print(f"  [bluesky] {ticker}: {exc}")
+
+    print(f"  [bluesky] {len(rows)} posts across {len(tickers[:30])} tickers")
     return rows
 
 
@@ -725,13 +811,25 @@ def run() -> None:
 
     try:
         invalid_tickers = d1.fetch_invalid_tickers()
+        historical      = d1.fetch_tracked_tickers()
+        seed_tickers    = sorted(historical or config.WATCHLIST)
 
-        print("\n── Scraping Reddit ──")
+        print("\n── Scraping Reddit (PullPush) ──")
         mentions = scrape_reddit()
 
-        print("\n── Scraping StockTwits ──")
-        st_mentions = fetch_stocktwits()
-        mentions = [m for m in (mentions + st_mentions) if m["ticker"] not in invalid_tickers]
+        print("\n── Scraping StockTwits (per-symbol) ──")
+        st_mentions = fetch_stocktwits(seed_tickers)
+
+        print("\n── Scraping Bluesky ──")
+        bsky_mentions = fetch_bluesky(seed_tickers)
+
+        print("\n── Scraping Mastodon ──")
+        masto_mentions = fetch_mastodon()
+
+        mentions = [
+            m for m in (mentions + st_mentions + bsky_mentions + masto_mentions)
+            if m["ticker"] not in invalid_tickers
+        ]
 
         stats["subreddits_scraped"] = len(config.SUBREDDITS)
         stats["mentions_scraped"]   = len(mentions)
@@ -753,7 +851,6 @@ def run() -> None:
         print("\n── Fetching market data (yFinance) ──")
         ticker_counts     = Counter(m["ticker"] for m in mentions)
         current_top       = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
-        historical        = d1.fetch_tracked_tickers()
         current_set       = set(current_top)
         extra             = [t for t in historical if t not in current_set]
         top_tickers       = (current_top + extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
