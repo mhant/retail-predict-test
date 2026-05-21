@@ -815,16 +815,17 @@ def run() -> None:
         rss_mentions = [m for m in news_to_mentions(rss_rows) if m["ticker"] not in invalid_tickers]
         print(f"  → {len(rss_mentions)} mention rows from {len(rss_rows)} RSS articles")
 
-        # Build initial ticker universe from social + RSS so we know what to fetch yfinance news for
-        initial_mentions  = social_mentions + rss_mentions
-        ticker_counts     = Counter(m["ticker"] for m in initial_mentions)
-        current_top       = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
-        current_set       = set(current_top)
-        extra             = [t for t in historical if t not in current_set]
-        top_tickers       = (current_top + extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
+        # Build ticker universe: current mentions + historical + WATCHLIST as guaranteed floor
+        initial_mentions = social_mentions + rss_mentions
+        ticker_counts    = Counter(m["ticker"] for m in initial_mentions)
+        current_top      = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
+        current_set      = set(current_top)
+        hist_extra       = [t for t in historical      if t not in current_set]
+        watch_extra      = [t for t in sorted(config.WATCHLIST) if t not in current_set and t not in set(hist_extra)]
+        top_tickers      = (current_top + hist_extra + watch_extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
 
         print("\n── Fetching yFinance news (per tracked ticker) ──")
-        yf_news      = fetch_yfinance_news(top_tickers[:50])
+        yf_news      = fetch_yfinance_news(top_tickers[:80])
         yf_mentions  = [m for m in news_to_mentions(yf_news) if m["ticker"] not in invalid_tickers]
         print(f"  → {len(yf_mentions)} mention rows from {len(yf_news)} yFinance articles")
 
