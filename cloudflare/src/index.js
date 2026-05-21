@@ -176,8 +176,7 @@ export default {
     // GET /api/sentiment?window=168
     // Aggregates raw_mentions directly using scraped_utc so all window sizes work.
     if (request.method === 'GET' && path === '/api/sentiment') {
-      const windowHours = parseInt(params.get('window') || '168', 10);
-      const cutoff = Date.now() / 1000 - windowHours * 3600;
+      const cutoff = Date.now() / 1000 - 720 * 3600; // fixed 30-day window
       const { results } = await env.DB.prepare(
         `SELECT
            ticker,
@@ -186,6 +185,7 @@ export default {
            AVG(vader_compound)                         AS upvote_weighted_sentiment,
            AVG(upvote_ratio)                           AS avg_upvote_ratio,
            COUNT(DISTINCT subreddit)                   AS source_count,
+           MAX(scraped_utc)                            AS latest_mention_utc,
            (SELECT title FROM raw_mentions sub
             WHERE sub.ticker = rm.ticker
               AND sub.scraped_utc >= ?1
@@ -199,10 +199,10 @@ export default {
              GROUP BY ticker HAVING COUNT(*) >= 2
            )
          GROUP BY ticker
-         ORDER BY mention_count DESC
+         ORDER BY MAX(scraped_utc) DESC
          LIMIT 200`
       ).bind(cutoff).all();
-      return apiJson({ ok: true, window_hours: windowHours, data: results });
+      return apiJson({ ok: true, data: results });
     }
 
     // GET /api/tracked-tickers — all tickers ever mentioned, minus confirmed-delisted

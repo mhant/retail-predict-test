@@ -851,7 +851,7 @@ def run() -> None:
         print(f"  → {len(hype_signals)} hype signals")
 
         print("\n── Fetching market data (yFinance) ──")
-        print(f"  tracking {len(top_tickers)} tickers ({len(current_top)} current + {len(extra)} historical)")
+        print(f"  tracking {len(top_tickers)} tickers ({len(current_top)} current + {len(hist_extra)} historical + {len(watch_extra)} watchlist)")
         price_rows, inst_rows, event_rows = fetch_market_data(top_tickers, started_at)
 
         d1.ingest("price_snapshots", price_rows, mode="replace")
