@@ -160,6 +160,49 @@ def fetch_stocktwits(tickers: list[str]) -> list[dict]:
     return rows
 
 
+def news_to_mentions(news_rows: list[dict]) -> list[dict]:
+    """
+    Convert news articles into raw_mention rows so they feed into sentiment.
+    yfinance news already has a ticker; RSS rows use whatever extract_tickers found.
+    Score is set to 5 so news gets a small but non-zero engagement weight.
+    """
+    rows: list[dict] = []
+    now  = time.time()
+    seen: set[tuple] = set()
+    for article in news_rows:
+        ticker = article.get("ticker")
+        if not ticker:
+            continue
+        source_id = str(article.get("article_id") or article.get("url") or "")[:200]
+        key = (source_id, ticker)
+        if key in seen:
+            continue
+        seen.add(key)
+        text   = f"{article.get('title', '')} {article.get('summary', '')}".strip()
+        scores = _vader.polarity_scores(text[:2000])
+        rows.append({
+            "source":         f"news_{article.get('source', 'rss')}",
+            "source_id":      source_id,
+            "subreddit":      article.get("source", "news"),
+            "ticker":         ticker,
+            "title":          article.get("title", "")[:500],
+            "selftext":       article.get("summary", "")[:2000],
+            "author":         "",
+            "score":          5,
+            "ups":            0,
+            "upvote_ratio":   0.5,
+            "num_comments":   0,
+            "url":            article.get("url", "")[:500],
+            "created_utc":    article.get("published_utc", now),
+            "scraped_utc":    now,
+            "vader_compound": scores["compound"],
+            "vader_positive": scores["pos"],
+            "vader_negative": scores["neg"],
+            "vader_neutral":  scores["neu"],
+        })
+    return rows
+
+
 _MASTODON_TAGS = ["investing", "stocks", "wallstreetbets", "stockmarket", "options"]
 
 
@@ -762,11 +805,31 @@ def run() -> None:
         st_mentions    = fetch_stocktwits(seed_tickers)
         bsky_mentions  = fetch_bluesky(seed_tickers)
         masto_mentions = fetch_mastodon()
-
-        mentions = [
+        social_mentions = [
             m for m in (st_mentions + bsky_mentions + masto_mentions)
             if m["ticker"] not in invalid_tickers
         ]
+
+        print("\n── Fetching RSS news (for ticker coverage) ──")
+        rss_rows     = fetch_news()
+        rss_mentions = [m for m in news_to_mentions(rss_rows) if m["ticker"] not in invalid_tickers]
+        print(f"  → {len(rss_mentions)} mention rows from {len(rss_rows)} RSS articles")
+
+        # Build initial ticker universe from social + RSS so we know what to fetch yfinance news for
+        initial_mentions  = social_mentions + rss_mentions
+        ticker_counts     = Counter(m["ticker"] for m in initial_mentions)
+        current_top       = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
+        current_set       = set(current_top)
+        extra             = [t for t in historical if t not in current_set]
+        top_tickers       = (current_top + extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
+
+        print("\n── Fetching yFinance news (per tracked ticker) ──")
+        yf_news      = fetch_yfinance_news(top_tickers[:50])
+        yf_mentions  = [m for m in news_to_mentions(yf_news) if m["ticker"] not in invalid_tickers]
+        print(f"  → {len(yf_mentions)} mention rows from {len(yf_news)} yFinance articles")
+
+        # All mentions: social + RSS news + yFinance news
+        mentions = initial_mentions + yf_mentions
 
         stats["subreddits_scraped"] = 0
         stats["mentions_scraped"]   = len(mentions)
@@ -774,7 +837,8 @@ def run() -> None:
 
         result = d1.ingest("raw_mentions", mentions)
         stats["new_mentions"] = result["inserted"]
-        print(f"  → {result['inserted']} new, {result['skipped']} dupes")
+        print(f"\n  → {result['inserted']} new, {result['skipped']} dupes "
+              f"({len(social_mentions)} social + {len(rss_mentions)} RSS + {len(yf_mentions)} yf_news)")
 
         print("\n── Computing ticker sentiment summary + hype signals ──")
         summaries = compute_sentiment_summary(mentions)
@@ -786,11 +850,6 @@ def run() -> None:
         print(f"  → {len(hype_signals)} hype signals")
 
         print("\n── Fetching market data (yFinance) ──")
-        ticker_counts     = Counter(m["ticker"] for m in mentions)
-        current_top       = [t for t, _ in ticker_counts.most_common(config.TOP_TICKERS_FOR_MARKET_DATA)]
-        current_set       = set(current_top)
-        extra             = [t for t in historical if t not in current_set]
-        top_tickers       = (current_top + extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
         print(f"  tracking {len(top_tickers)} tickers ({len(current_top)} current + {len(extra)} historical)")
         price_rows, inst_rows, event_rows = fetch_market_data(top_tickers, started_at)
 
@@ -809,10 +868,8 @@ def run() -> None:
             d1.ingest("combined_predictions", combined_preds)
             stats["predictions_written"] = len(combined_preds)
 
-        print("\n── Fetching news (RSS + yFinance) ──")
-        news_rows = fetch_news()
-        yf_news   = fetch_yfinance_news(top_tickers[:50])
-        d1.ingest("news_articles", news_rows + yf_news)
+        print("\n── Storing news articles ──")
+        d1.ingest("news_articles", rss_rows + yf_news)
 
         print("\n── Fetching insider trades (SEC EDGAR Form 4) ──")
         insider_rows = fetch_insider_trades()
