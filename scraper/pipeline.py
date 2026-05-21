@@ -338,29 +338,38 @@ def _classify(prob_up: float) -> str:
     return "neutral"
 
 
-def run_model_predictions(
-    price_rows: list[dict],
-    inst_rows:  list[dict],
+def run_predictions(
+    price_rows:   list[dict],
+    inst_rows:    list[dict],
+    hype_signals: list[dict],
 ) -> list[dict]:
     """
-    Run XGBoost inference using available technical + institutional features.
-    Social features (Group A) are left as NaN — XGBoost handles these natively.
+    Run XGBoost inference across all historical price bars and blend with hype signals.
+
+    For each ticker:
+    - ALL historical bars get model-only predictions (backfill, hype_weight=0)
+    - The LATEST bar gets a 70/30 blend of model + hype when hype data exists
+    predicted_at = bar timestamp so dots align with actual price dates.
+    UNIQUE(ticker, horizon, predicted_at) means INSERT OR IGNORE deduplicates reruns.
     """
     if not price_rows:
         return []
 
-    # Latest price bar per ticker
-    by_ticker: dict[str, dict] = {}
+    # Normalise hype avg_sentiment (-1..+1) to probability (0..1)
+    hype_map: dict[str, float] = {}
+    for h in hype_signals:
+        s = h.get("avg_sentiment") or 0.0
+        hype_map[h["ticker"]] = (float(s) + 1.0) / 2.0
+
+    # Group ALL bars by ticker, sorted oldest → newest
+    by_ticker: dict[str, list[dict]] = defaultdict(list)
     for row in price_rows:
-        t = row["ticker"]
-        if t not in by_ticker or row["ts"] > by_ticker[t]["ts"]:
-            by_ticker[t] = row
+        by_ticker[row["ticker"]].append(row)
+    for bars in by_ticker.values():
+        bars.sort(key=lambda r: r["ts"])
 
-    # Institutional data lookup
     inst_map = {r["ticker"]: r for r in inst_rows}
-
     predictions: list[dict] = []
-    now = time.time()
 
     for horizon, model_file in _HORIZONS.items():
         model_path = _MODELS_DIR / model_file
@@ -374,46 +383,58 @@ def run_model_predictions(
             print(f"  [xgb] failed to load {horizon}: {exc}")
             continue
 
-        rows_for_model: list[dict] = []
-        tickers_order: list[str]  = []
+        all_fvs: list[dict]  = []
+        meta:    list[tuple] = []   # (ticker, bar_ts, is_current)
 
-        for ticker, price in by_ticker.items():
-            inst = inst_map.get(ticker, {})
-            fv = {col: np.nan for col in _FEATURE_COLS}
-            # Group C (technical) — from latest price bar
-            fv["rsi_14"]            = price.get("rsi_14")
-            fv["macd_histogram"]    = price.get("macd_histogram")
-            fv["bb_position"]       = price.get("bb_position")
-            fv["volume_ratio_20d"]  = price.get("volume_ratio_20d")
-            fv["price_momentum_1d"] = price.get("price_momentum_1d")
-            fv["price_momentum_5d"] = price.get("price_momentum_5d")
-            fv["atr_normalized"]    = price.get("atr_normalized")
-            # Group B (institutional)
-            fv["short_interest_pct"]          = inst.get("short_interest_pct")
-            fv["short_ratio"]                 = inst.get("short_ratio")
-            fv["institutional_ownership_pct"] = inst.get("institutional_ownership_pct")
+        for ticker, bars in by_ticker.items():
+            inst    = inst_map.get(ticker, {})
+            last_ts = bars[-1]["ts"]
+            for price in bars:
+                is_current = (price["ts"] == last_ts)
+                fv = {col: np.nan for col in _FEATURE_COLS}
+                fv["rsi_14"]            = price.get("rsi_14")
+                fv["macd_histogram"]    = price.get("macd_histogram")
+                fv["bb_position"]       = price.get("bb_position")
+                fv["volume_ratio_20d"]  = price.get("volume_ratio_20d")
+                fv["price_momentum_1d"] = price.get("price_momentum_1d")
+                fv["price_momentum_5d"] = price.get("price_momentum_5d")
+                fv["atr_normalized"]    = price.get("atr_normalized")
+                if is_current:
+                    fv["short_interest_pct"]          = inst.get("short_interest_pct")
+                    fv["short_ratio"]                 = inst.get("short_ratio")
+                    fv["institutional_ownership_pct"] = inst.get("institutional_ownership_pct")
+                all_fvs.append(fv)
+                meta.append((ticker, price["ts"], is_current))
 
-            rows_for_model.append(fv)
-            tickers_order.append(ticker)
-
-        if not rows_for_model:
+        if not all_fvs:
             continue
 
         try:
-            X     = pd.DataFrame(rows_for_model, columns=_FEATURE_COLS).astype(float)
+            X     = pd.DataFrame(all_fvs, columns=_FEATURE_COLS).astype(float)
             proba = model.predict_proba(X)[:, 1]
 
-            for ticker, prob_up in zip(tickers_order, proba):
-                prob_up = float(prob_up)
+            for (ticker, bar_ts, is_current), model_prob in zip(meta, proba):
+                model_prob = float(model_prob)
+                if is_current and ticker in hype_map:
+                    hype_prob    = hype_map[ticker]
+                    blended      = model_prob * 0.7 + hype_prob * 0.3
+                    model_weight = 0.7
+                    hype_weight  = 0.3
+                else:
+                    blended      = model_prob
+                    model_weight = 1.0
+                    hype_weight  = 0.0
                 predictions.append({
-                    "ticker":          ticker,
-                    "horizon":         horizon,
-                    "predicted_at":    now,
-                    "signal":          _classify(prob_up),
-                    "probability_up":  prob_up,
-                    "probability_down": 1.0 - prob_up,
-                    "confidence":      abs(prob_up - 0.5) * 2,
-                    "feature_ts":      now,
+                    "ticker":             ticker,
+                    "horizon":            horizon,
+                    "predicted_at":       bar_ts,
+                    "signal":             _classify(blended),
+                    "probability_up":     blended,
+                    "confidence":         abs(blended - 0.5) * 2,
+                    "model_weight":       model_weight,
+                    "hype_weight":        hype_weight,
+                    "model_prediction_id": None,
+                    "hype_signal_id":     None,
                 })
         except Exception as exc:
             print(f"  [xgb] inference error for {horizon}: {exc}")
@@ -782,11 +803,11 @@ def run() -> None:
             d1.ingest("scraper_events", event_rows)
         stats["prices_updated"] = len(price_rows)
 
-        print("\n── Running XGBoost model predictions ──")
-        model_preds = run_model_predictions(price_rows, inst_rows)
-        if model_preds:
-            d1.ingest("model_predictions", model_preds)
-            stats["predictions_written"] = len(model_preds)
+        print("\n── Running XGBoost predictions (blended model + hype) ──")
+        combined_preds = run_predictions(price_rows, inst_rows, hype_signals)
+        if combined_preds:
+            d1.ingest("combined_predictions", combined_preds)
+            stats["predictions_written"] = len(combined_preds)
 
         print("\n── Fetching news (RSS + yFinance) ──")
         news_rows = fetch_news()

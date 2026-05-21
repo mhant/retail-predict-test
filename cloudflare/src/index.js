@@ -287,8 +287,8 @@ export default {
       if (!ticker) return apiJson({ ok: false, error: 'ticker param required' }, 400)
       const [modelRows, hyp, histRows] = await Promise.all([
         env.DB.prepare(
-          `SELECT horizon, signal, probability_up, probability_down, confidence, predicted_at
-           FROM model_predictions WHERE ticker = ?1
+          `SELECT horizon, signal, probability_up, confidence, predicted_at, model_weight, hype_weight
+           FROM combined_predictions WHERE ticker = ?1
            ORDER BY predicted_at DESC LIMIT 3`
         ).bind(ticker).all(),
         env.DB.prepare(
@@ -298,9 +298,9 @@ export default {
            ORDER BY computed_at DESC LIMIT 1`
         ).bind(ticker).first(),
         env.DB.prepare(
-          `SELECT horizon, signal, probability_up, confidence, predicted_at
-           FROM model_predictions WHERE ticker = ?1
-           ORDER BY predicted_at DESC LIMIT 60`
+          `SELECT horizon, signal, probability_up, confidence, predicted_at, model_weight, hype_weight
+           FROM combined_predictions WHERE ticker = ?1
+           ORDER BY predicted_at DESC LIMIT 100`
         ).bind(ticker).all(),
       ])
       return apiJson({ ok: true, ticker, model: modelRows.results, hype: hyp, history: histRows.results })
