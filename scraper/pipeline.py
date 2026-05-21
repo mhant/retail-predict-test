@@ -98,84 +98,7 @@ def extract_tickers(text: str) -> list[str]:
     return [s for s, _ in sorted(found.items(), key=lambda x: x[1])]
 
 
-# ── Reddit scrapers ────────────────────────────────────────────────────────────
-
-_REDDIT_UA = "retail-predict-bot/1.0 (by /u/retail_predict_bot)"
-
-
-def _fetch_pullpush(subreddit: str, size: int = 25, after: int | None = None) -> list[dict]:
-    """Fetch posts from PullPush archive sorted by newest first, optionally after a timestamp."""
-    url = (
-        f"https://api.pullpush.io/reddit/search/submission/"
-        f"?subreddit={subreddit}&size={size}&sort=created_utc&sort_type=desc"
-    )
-    if after:
-        url += f"&after={after}"
-    try:
-        resp = _session.get(url, timeout=20)
-        resp.raise_for_status()
-        return resp.json().get("data", [])
-    except Exception as exc:
-        print(f"  [pullpush] {subreddit}: {exc}")
-        return []
-
-
-def _posts_to_mentions(posts: list[dict], source: str, now: float) -> list[dict]:
-    rows = []
-    for post in posts:
-        full_text = f"{post.get('title', '')} {post.get('selftext', '')}".strip()
-        tickers = extract_tickers(full_text)
-        if not tickers:
-            continue
-        scores = _vader.polarity_scores(full_text[:2000])
-        permalink = post.get("permalink", "")
-        url = f"https://reddit.com{permalink}" if permalink.startswith("/") else post.get("url", "")
-        for ticker in tickers:
-            rows.append({
-                "source":         source,
-                "source_id":      post.get("id", ""),
-                "subreddit":      post.get("subreddit", ""),
-                "ticker":         ticker,
-                "title":          post.get("title", "")[:500],
-                "selftext":       post.get("selftext", "")[:2000],
-                "author":         post.get("author", ""),
-                "score":          int(post.get("score", 0)),
-                "ups":            int(post.get("ups", 0)),
-                "upvote_ratio":   float(post.get("upvote_ratio", 0)),
-                "num_comments":   int(post.get("num_comments", 0)),
-                "url":            url,
-                "created_utc":    float(post.get("created_utc", now)),
-                "scraped_utc":    now,
-                "vader_compound": scores["compound"],
-                "vader_positive": scores["pos"],
-                "vader_negative": scores["neg"],
-                "vader_neutral":  scores["neu"],
-            })
-    return rows
-
-
-def scrape_reddit() -> list[dict]:
-    now = time.time()
-    after_ts = int(now - 14 * 3600)  # only posts from the last 14h — covers twice-daily gap
-    mention_rows: list[dict] = []
-
-    for sub in config.SUBREDDITS:
-        pp_posts = _fetch_pullpush(sub, config.POSTS_PER_SUBREDDIT, after=after_ts)
-        mention_rows.extend(_posts_to_mentions(pp_posts, "pullpush_reddit", now))
-        time.sleep(0.5)
-        print(f"  [reddit] {sub}: {len(pp_posts)} posts")
-
-    seen: set[tuple] = set()
-    unique: list[dict] = []
-    for row in mention_rows:
-        key = (row["source_id"], row["ticker"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(row)
-
-    print(f"  [reddit] {len(unique)} unique mention rows from {len(config.SUBREDDITS)} subreddits")
-    return unique
-
+_SOCIAL_UA = "retail-predict-bot/1.0 (+https://github.com/mhant/retail-predict-test)"
 
 # ── Ticker sentiment summary ───────────────────────────────────────────────────
 
@@ -195,7 +118,7 @@ def fetch_stocktwits(tickers: list[str]) -> list[dict]:
     for ticker in tickers[:40]:
         try:
             url  = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-            resp = _session.get(url, timeout=15, headers={"User-Agent": _REDDIT_UA})
+            resp = _session.get(url, timeout=15, headers={"User-Agent": _SOCIAL_UA})
             resp.raise_for_status()
             messages = resp.json().get("messages", [])
             for msg in messages:
@@ -814,24 +737,17 @@ def run() -> None:
         historical      = d1.fetch_tracked_tickers()
         seed_tickers    = sorted(historical or config.WATCHLIST)
 
-        print("\n── Scraping Reddit (PullPush) ──")
-        mentions = scrape_reddit()
-
-        print("\n── Scraping StockTwits (per-symbol) ──")
-        st_mentions = fetch_stocktwits(seed_tickers)
-
-        print("\n── Scraping Bluesky ──")
-        bsky_mentions = fetch_bluesky(seed_tickers)
-
-        print("\n── Scraping Mastodon ──")
+        print("\n── Scraping social sources ──")
+        st_mentions    = fetch_stocktwits(seed_tickers)
+        bsky_mentions  = fetch_bluesky(seed_tickers)
         masto_mentions = fetch_mastodon()
 
         mentions = [
-            m for m in (mentions + st_mentions + bsky_mentions + masto_mentions)
+            m for m in (st_mentions + bsky_mentions + masto_mentions)
             if m["ticker"] not in invalid_tickers
         ]
 
-        stats["subreddits_scraped"] = len(config.SUBREDDITS)
+        stats["subreddits_scraped"] = 0
         stats["mentions_scraped"]   = len(mentions)
         stats["vader_scored"]       = len(mentions)
 
