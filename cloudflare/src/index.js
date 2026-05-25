@@ -368,11 +368,17 @@ export default {
 
       // Cloudflare Workers AI moderation — fail closed
       try {
-        const aiRes = await env.AI.run('@cf/meta/llama-3.2-1b-instruct', {
+        const aiRes = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
           messages: [
             {
               role: 'system',
-              content: 'You are a content moderator for a public financial discussion site. Classify the user message as safe or unsafe. Unsafe content includes hate speech, threats, violence, explicit sexual content, content involving minors, harassment, or discrimination. Reply with ONLY the single word "safe" or "unsafe".',
+              content: `You are a content safety classifier for a stock market discussion site. Users post opinions about publicly traded companies and market trends — e.g. "NVDA looks bullish", "Apple poised to dominate AI", "OpenAI and Anthropic prepping for IPOs". Financial discussion, stock tips, company analysis, and investment opinions are ALL safe, even if you disagree with them.
+
+Classify as UNSAFE only if the message contains: hate speech, racial or ethnic slurs, explicit threats of violence against a person, explicit sexual content, sexual content involving minors, or targeted personal harassment.
+
+Market opinions, company names, predictions, hype, FUD, and any other stock-related discussion are SAFE.
+
+Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanation.`,
             },
             { role: 'user', content: trimmed },
           ],
