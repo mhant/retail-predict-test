@@ -11,3 +11,6 @@ database_id = "35a978cb-e8cf-48b5-9d1a-7375677b9493"
 # WRITE_TOKEN is set as a Wrangler secret (not stored here):
 #   wrangler secret put WRITE_TOKEN
 # The scraper sends this in the Authorization: Bearer header.
+
+[ai]
+binding = "AI"

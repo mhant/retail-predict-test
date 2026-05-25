@@ -331,7 +331,7 @@ export default {
 
     // POST /api/tips — submit a user tip (public, Turnstile + moderation guarded)
     if (request.method === 'POST' && path === '/api/tips') {
-      if (!env.OPENAI_API_KEY || !env.TURNSTILE_SECRET) {
+      if (!env.TURNSTILE_SECRET) {
         return json({ ok: false, error: 'Tip submission not configured' }, 503)
       }
       let body
@@ -366,25 +366,26 @@ export default {
         if ((rateRow?.cnt ?? 0) >= 5) return json({ ok: false, error: 'rate_limited' }, 429)
       }
 
-      // OpenAI Moderation — fail closed: any error rejects the tip rather than allowing it through
-      let modResult
+      // Cloudflare Workers AI moderation — fail closed
       try {
-        const modRes = await fetch('https://api.openai.com/v1/moderations', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.OPENAI_API_KEY}` },
-          body: JSON.stringify({ input: trimmed }),
+        const aiRes = await env.AI.run('@cf/meta/llama-3.2-1b-instruct', {
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a content moderator for a public financial discussion site. Classify the user message as safe or unsafe. Unsafe content includes hate speech, threats, violence, explicit sexual content, content involving minors, harassment, or discrimination. Reply with ONLY the single word "safe" or "unsafe".',
+            },
+            { role: 'user', content: trimmed },
+          ],
+          max_tokens: 5,
+          temperature: 0,
         })
-        if (!modRes.ok) throw new Error(`OpenAI returned ${modRes.status}`)
-        const modData = await modRes.json()
-        modResult = modData.results?.[0]
+        const verdict = (aiRes.response || '').trim().toLowerCase()
+        if (!verdict.startsWith('safe')) {
+          return json({ ok: false, error: 'flagged' }, 422)
+        }
       } catch (err) {
-        console.error('OpenAI moderation error:', err.message)
+        console.error('AI moderation error:', err.message)
         return json({ ok: false, error: 'moderation_unavailable' }, 503)
-      }
-      if (!modResult) return json({ ok: false, error: 'moderation_unavailable' }, 503)
-      if (modResult.flagged) {
-        const cats = Object.entries(modResult.categories ?? {}).filter(([, v]) => v).map(([k]) => k)
-        return json({ ok: false, error: 'flagged', categories: cats }, 422)
       }
 
       // Store approved tip
@@ -406,6 +407,35 @@ export default {
          ORDER BY submitted_at DESC LIMIT 20`
       ).bind(ticker.toUpperCase()).all()
       return apiJson({ ok: true, ticker, data: results })
+    }
+
+    // POST /api/tips/:id/report — flag a tip for review (public)
+    const reportMatch = path.match(/^\/api\/tips\/(\d+)\/report$/)
+    if (request.method === 'POST' && reportMatch) {
+      const tipId = parseInt(reportMatch[1])
+      const { meta } = await env.DB.prepare(
+        "UPDATE tips SET status = 'reported' WHERE id = ?1 AND status = 'approved'"
+      ).bind(tipId).run()
+      if (!meta.changes) return json({ ok: false, error: 'not_found' }, 404)
+      return json({ ok: true })
+    }
+
+    // DELETE /api/tips/:id — hard delete (auth required)
+    const deleteMatch = path.match(/^\/api\/tips\/(\d+)$/)
+    if (request.method === 'DELETE' && deleteMatch) {
+      if (!isAuthed(request, env)) return unauthorized()
+      const tipId = parseInt(deleteMatch[1])
+      await env.DB.prepare('DELETE FROM tips WHERE id = ?1').bind(tipId).run()
+      return json({ ok: true })
+    }
+
+    // GET /api/tips/reported — tips flagged for review (auth required)
+    if (request.method === 'GET' && path === '/api/tips/reported') {
+      if (!isAuthed(request, env)) return unauthorized()
+      const { results } = await env.DB.prepare(
+        "SELECT id, ticker, body, submitted_at FROM tips WHERE status = 'reported' ORDER BY submitted_at DESC"
+      ).all()
+      return apiJson({ ok: true, data: results })
     }
 
     // GET /api/tips/recent — all approved tips from last 30h (pipeline, auth required)
