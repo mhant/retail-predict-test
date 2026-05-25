@@ -160,6 +160,12 @@ async function batchInsert(db, table, rows, mode) {
 }
 
 
+async function hashIp(ip) {
+  const data = new TextEncoder().encode(ip || 'unknown')
+  const buf  = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
+}
+
 export default {
   async fetch(request, env) {
     const url    = new URL(request.url);
@@ -313,6 +319,87 @@ export default {
          FROM scraper_events ORDER BY occurred_at DESC LIMIT 100`
       ).all();
       return apiJson({ ok: true, data: results });
+    }
+
+    // ── Tipline ───────────────────────────────────────────────────────────────
+
+    // POST /api/tips — submit a user tip (public, Turnstile + moderation guarded)
+    if (request.method === 'POST' && path === '/api/tips') {
+      if (!env.OPENAI_API_KEY || !env.TURNSTILE_SECRET) {
+        return json({ ok: false, error: 'Tip submission not configured' }, 503)
+      }
+      let body
+      try { body = await request.json() } catch { return badRequest('Invalid JSON') }
+
+      const { ticker, tip, turnstileToken } = body
+      if (!ticker || typeof ticker !== 'string') return badRequest('ticker required')
+      if (!tip || typeof tip !== 'string') return badRequest('tip required')
+      const trimmed = tip.trim()
+      if (trimmed.length < 10)  return badRequest('Tip must be at least 10 characters')
+      if (trimmed.length > 500) return badRequest('Tip must be under 500 characters')
+      if (!turnstileToken)      return badRequest('Turnstile token required')
+
+      // Verify Turnstile
+      const tsForm = new FormData()
+      tsForm.append('secret',   env.TURNSTILE_SECRET)
+      tsForm.append('response', turnstileToken)
+      tsForm.append('remoteip', request.headers.get('CF-Connecting-IP') || '')
+      const tsRes  = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: tsForm })
+      const tsData = await tsRes.json()
+      if (!tsData.success) return json({ ok: false, error: 'bot_check_failed' }, 422)
+
+      // Rate limit: max 3 tips per IP per 24h
+      const ipHash = await hashIp(request.headers.get('CF-Connecting-IP') || '')
+      const cutoff = Math.floor(Date.now() / 1000) - 86400
+      const rateRow = await env.DB.prepare(
+        'SELECT COUNT(*) AS cnt FROM tips WHERE ip_hash = ?1 AND submitted_at > ?2'
+      ).bind(ipHash, cutoff).first()
+      if ((rateRow?.cnt ?? 0) >= 3) return json({ ok: false, error: 'rate_limited' }, 429)
+
+      // OpenAI Moderation
+      const modRes  = await fetch('https://api.openai.com/v1/moderations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.OPENAI_API_KEY}` },
+        body: JSON.stringify({ input: trimmed }),
+      })
+      const modData = await modRes.json()
+      const result  = modData.results?.[0]
+      if (result?.flagged) {
+        const cats = Object.entries(result.categories ?? {}).filter(([, v]) => v).map(([k]) => k)
+        return json({ ok: false, error: 'flagged', categories: cats }, 422)
+      }
+
+      // Store approved tip
+      const now = Math.floor(Date.now() / 1000)
+      await env.DB.prepare(
+        'INSERT INTO tips (ticker, body, status, submitted_at, ip_hash) VALUES (?1, ?2, ?3, ?4, ?5)'
+      ).bind(ticker.toUpperCase().trim(), trimmed, 'approved', now, ipHash).run()
+
+      return json({ ok: true })
+    }
+
+    // GET /api/tips?ticker=GME — public feed of approved tips for a ticker
+    if (request.method === 'GET' && path === '/api/tips') {
+      const ticker = params.get('ticker')
+      if (!ticker) return badRequest('ticker param required')
+      const { results } = await env.DB.prepare(
+        `SELECT id, ticker, body, submitted_at
+         FROM tips WHERE ticker = ?1 AND status = 'approved'
+         ORDER BY submitted_at DESC LIMIT 20`
+      ).bind(ticker.toUpperCase()).all()
+      return apiJson({ ok: true, ticker, data: results })
+    }
+
+    // GET /api/tips/recent — all approved tips from last 30h (pipeline, auth required)
+    if (request.method === 'GET' && path === '/api/tips/recent') {
+      if (!isAuthed(request, env)) return unauthorized()
+      const cutoff = Math.floor(Date.now() / 1000) - 108000
+      const { results } = await env.DB.prepare(
+        `SELECT id, ticker, body, submitted_at
+         FROM tips WHERE status = 'approved' AND submitted_at > ?1
+         ORDER BY submitted_at DESC`
+      ).bind(cutoff).all()
+      return apiJson({ ok: true, data: results })
     }
 
     // ── Health check (no auth) ────────────────────────────────────────────────

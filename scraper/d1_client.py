@@ -25,6 +25,16 @@ def fetch_tracked_tickers() -> frozenset[str]:
     return frozenset()
 
 
+def fetch_user_tips() -> list[dict]:
+    try:
+        resp = _SESSION.get(f"{WORKER_URL}/api/tips/recent", timeout=10)
+        if resp.ok:
+            return resp.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
 def fetch_invalid_tickers() -> frozenset[str]:
     try:
         resp = _SESSION.get(

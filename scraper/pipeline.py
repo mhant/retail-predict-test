@@ -313,6 +313,37 @@ def fetch_bluesky(tickers: list[str]) -> list[dict]:
     return rows
 
 
+def ingest_user_tips(all_mentions: list[dict]) -> None:
+    """Fetch approved user tips and add them to the mention pool with low trust weight."""
+    tips = d1.fetch_user_tips()
+    if not tips:
+        print("  [tips] 0 user tips")
+        return
+    for tip in tips:
+        scored = _vader.polarity_scores(tip["body"][:2000])
+        all_mentions.append({
+            "source":         "user_tip",
+            "source_id":      f"tip_{tip['id']}",
+            "subreddit":      "user_tip",
+            "ticker":         tip["ticker"],
+            "title":          tip["body"][:500],
+            "selftext":       "",
+            "author":         "anonymous",
+            "score":          1,
+            "ups":            0,
+            "upvote_ratio":   0.5,
+            "num_comments":   0,
+            "url":            "",
+            "created_utc":    tip["submitted_at"],
+            "scraped_utc":    time.time(),
+            "vader_compound": scored["compound"],
+            "vader_positive": scored["pos"],
+            "vader_negative": scored["neg"],
+            "vader_neutral":  scored["neu"],
+        })
+    print(f"  [tips] {len(tips)} user tips added to mention pool")
+
+
 def compute_hype_signals(mentions: list[dict]) -> list[dict]:
     """Compute hype buy/sell signals from sentiment data per ticker."""
     by_ticker: dict[str, list[dict]] = defaultdict(list)
@@ -831,6 +862,9 @@ def run() -> None:
 
         # All mentions: social + RSS news + yFinance news
         mentions = initial_mentions + yf_mentions
+
+        print("\n── Ingesting user tips ──")
+        ingest_user_tips(mentions)
 
         stats["subreddits_scraped"] = 0
         stats["mentions_scraped"]   = len(mentions)
