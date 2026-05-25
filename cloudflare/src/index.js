@@ -321,6 +321,12 @@ export default {
       return apiJson({ ok: true, data: results });
     }
 
+    // GET /api/debug/ip-hash — returns your hashed IP (for setting up the rate-limit allowlist)
+    if (request.method === 'GET' && path === '/api/debug/ip-hash') {
+      const ipHash = await hashIp(request.headers.get('CF-Connecting-IP') || '')
+      return json({ ip_hash: ipHash })
+    }
+
     // ── Tipline ───────────────────────────────────────────────────────────────
 
     // POST /api/tips — submit a user tip (public, Turnstile + moderation guarded)
@@ -348,24 +354,36 @@ export default {
       const tsData = await tsRes.json()
       if (!tsData.success) return json({ ok: false, error: 'bot_check_failed' }, 422)
 
-      // Rate limit: max 3 tips per IP per 24h
-      const ipHash = await hashIp(request.headers.get('CF-Connecting-IP') || '')
-      const cutoff = Math.floor(Date.now() / 1000) - 86400
-      const rateRow = await env.DB.prepare(
-        'SELECT COUNT(*) AS cnt FROM tips WHERE ip_hash = ?1 AND submitted_at > ?2'
-      ).bind(ipHash, cutoff).first()
-      if ((rateRow?.cnt ?? 0) >= 3) return json({ ok: false, error: 'rate_limited' }, 429)
+      // Rate limit: max 5 tips per IP per hour (allowlisted IPs bypass)
+      const ipHash     = await hashIp(request.headers.get('CF-Connecting-IP') || '')
+      const allowlist  = (env.ALLOWLISTED_IP_HASHES || '').split(',').map(s => s.trim()).filter(Boolean)
+      const isAllowed  = allowlist.includes(ipHash)
+      if (!isAllowed) {
+        const cutoff = Math.floor(Date.now() / 1000) - 3600
+        const rateRow = await env.DB.prepare(
+          'SELECT COUNT(*) AS cnt FROM tips WHERE ip_hash = ?1 AND submitted_at > ?2'
+        ).bind(ipHash, cutoff).first()
+        if ((rateRow?.cnt ?? 0) >= 5) return json({ ok: false, error: 'rate_limited' }, 429)
+      }
 
-      // OpenAI Moderation
-      const modRes  = await fetch('https://api.openai.com/v1/moderations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.OPENAI_API_KEY}` },
-        body: JSON.stringify({ input: trimmed }),
-      })
-      const modData = await modRes.json()
-      const result  = modData.results?.[0]
-      if (result?.flagged) {
-        const cats = Object.entries(result.categories ?? {}).filter(([, v]) => v).map(([k]) => k)
+      // OpenAI Moderation — fail closed: any error rejects the tip rather than allowing it through
+      let modResult
+      try {
+        const modRes = await fetch('https://api.openai.com/v1/moderations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.OPENAI_API_KEY}` },
+          body: JSON.stringify({ input: trimmed }),
+        })
+        if (!modRes.ok) throw new Error(`OpenAI returned ${modRes.status}`)
+        const modData = await modRes.json()
+        modResult = modData.results?.[0]
+      } catch (err) {
+        console.error('OpenAI moderation error:', err.message)
+        return json({ ok: false, error: 'moderation_unavailable' }, 503)
+      }
+      if (!modResult) return json({ ok: false, error: 'moderation_unavailable' }, 503)
+      if (modResult.flagged) {
+        const cats = Object.entries(modResult.categories ?? {}).filter(([, v]) => v).map(([k]) => k)
         return json({ ok: false, error: 'flagged', categories: cats }, 422)
       }
 
