@@ -91,6 +91,9 @@ const SCHEMA = {
   scraper_events: [
     'event_type', 'ticker', 'detail', 'pipeline_started_at', 'occurred_at',
   ],
+  ticker_metadata: [
+    'ticker', 'company_name', 'sector', 'industry', 'exchange', 'quote_type', 'updated_at',
+  ],
 };
 
 // Tables where we REPLACE (upsert) instead of IGNORE on conflict
@@ -98,6 +101,7 @@ const UPSERT_TABLES = new Set([
   'ticker_sentiment_summary',
   'institutional_data',
   'pipeline_runs',
+  'ticker_metadata',
 ]);
 
 const D1_BATCH_SIZE = 100; // D1 batch limit per call
@@ -185,26 +189,32 @@ export default {
       const cutoff = Date.now() / 1000 - 720 * 3600; // fixed 30-day window
       const { results } = await env.DB.prepare(
         `SELECT
-           ticker,
+           rm.ticker,
            COUNT(*)                                    AS mention_count,
            AVG(vader_compound)                         AS avg_sentiment,
            AVG(vader_compound)                         AS upvote_weighted_sentiment,
            AVG(upvote_ratio)                           AS avg_upvote_ratio,
            COUNT(DISTINCT subreddit)                   AS source_count,
            MAX(scraped_utc)                            AS latest_mention_utc,
+           tm.company_name,
+           tm.sector,
+           tm.industry,
+           tm.exchange,
+           tm.quote_type,
            (SELECT title FROM raw_mentions sub
             WHERE sub.ticker = rm.ticker
               AND sub.scraped_utc >= ?1
               AND sub.vader_compound IS NOT NULL
             ORDER BY score DESC LIMIT 1)              AS top_title
          FROM raw_mentions rm
+         LEFT JOIN ticker_metadata tm ON tm.ticker = rm.ticker
          WHERE scraped_utc >= ?1 AND vader_compound IS NOT NULL
-           AND ticker NOT IN (
+           AND rm.ticker NOT IN (
              SELECT ticker FROM scraper_events
              WHERE event_type IN ('ticker_not_found', 'delisted')
              GROUP BY ticker HAVING COUNT(*) >= 2
            )
-         GROUP BY ticker
+         GROUP BY rm.ticker
          ORDER BY MAX(scraped_utc) DESC
          LIMIT 200`
       ).bind(cutoff).all();

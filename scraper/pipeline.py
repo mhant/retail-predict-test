@@ -596,14 +596,15 @@ def _compute_indicators(hist: pd.DataFrame) -> pd.DataFrame:
 
 def fetch_market_data(
     tickers: list[str], pipeline_started_at: float
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """
-    Returns (price_snapshot_rows, institutional_data_rows, scraper_event_rows).
+    Returns (price_snapshot_rows, institutional_data_rows, scraper_event_rows, metadata_rows).
     Fetches 3 months of history so technical indicators have enough periods.
     """
-    price_rows:   list[dict] = []
-    inst_rows:    list[dict] = []
-    event_rows:   list[dict] = []
+    price_rows:    list[dict] = []
+    inst_rows:     list[dict] = []
+    event_rows:    list[dict] = []
+    metadata_rows: list[dict] = []
     today = time.strftime("%Y-%m-%d")
     now   = time.time()
 
@@ -663,6 +664,17 @@ def fetch_market_data(
                     "short_ratio":                 full_info.get("shortRatio"),
                     "institutional_ownership_pct": full_info.get("institutionsPercentHeld"),
                 })
+                company_name = full_info.get("longName") or full_info.get("shortName") or ""
+                if company_name:
+                    metadata_rows.append({
+                        "ticker":       ticker,
+                        "company_name": company_name,
+                        "sector":       full_info.get("sector") or "",
+                        "industry":     full_info.get("industry") or "",
+                        "exchange":     full_info.get("exchange") or "",
+                        "quote_type":   full_info.get("quoteType") or "",
+                        "updated_at":   int(now),
+                    })
             except Exception:
                 pass
             inst_rows.append(inst_row)
@@ -680,11 +692,11 @@ def fetch_market_data(
                 "occurred_at":         now,
             })
 
-    print(f"  [yfinance] {len(price_rows)} price rows, {len(inst_rows)} ok, {len(event_rows)} skipped")
+    print(f"  [yfinance] {len(price_rows)} price rows, {len(inst_rows)} ok, {len(event_rows)} skipped, {len(metadata_rows)} metadata")
     if event_rows:
         print(f"  [yfinance] skipped: {[e['ticker'] for e in event_rows]}")
 
-    return price_rows, inst_rows, event_rows
+    return price_rows, inst_rows, event_rows, metadata_rows
 
 
 def fetch_yfinance_news(tickers: list[str]) -> list[dict]:
@@ -886,13 +898,15 @@ def run() -> None:
 
         print("\n── Fetching market data (yFinance) ──")
         print(f"  tracking {len(top_tickers)} tickers ({len(current_top)} current + {len(hist_extra)} historical + {len(watch_extra)} watchlist)")
-        price_rows, inst_rows, event_rows = fetch_market_data(top_tickers, started_at)
+        price_rows, inst_rows, event_rows, metadata_rows = fetch_market_data(top_tickers, started_at)
 
         d1.ingest("price_snapshots", price_rows, mode="replace")
         d1.ingest("institutional_data", [
             r for r in inst_rows
             if any(v for k, v in r.items() if k not in ("ticker", "report_date") and v is not None)
         ], mode="replace")
+        if metadata_rows:
+            d1.ingest("ticker_metadata", metadata_rows, mode="replace")
         if event_rows:
             d1.ingest("scraper_events", event_rows)
         stats["prices_updated"] = len(price_rows)
