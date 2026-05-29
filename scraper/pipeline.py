@@ -106,18 +106,24 @@ def _bsky_auth() -> str | None:
     identifier = os.environ.get('BSKY_IDENTIFIER', '').strip()
     password   = os.environ.get('BSKY_APP_PASSWORD', '').strip()
     if not identifier or not password:
-        print("  [bluesky] BSKY_IDENTIFIER / BSKY_APP_PASSWORD not set — skipping auth")
+        print(f"  [bluesky] missing secrets (BSKY_IDENTIFIER={'set' if identifier else 'MISSING'}, "
+              f"BSKY_APP_PASSWORD={'set' if password else 'MISSING'}) — skipping")
         return None
+    print(f"  [bluesky] authenticating as {identifier}")
     try:
         resp = _session.post(
             'https://bsky.social/xrpc/com.atproto.server.createSession',
             json={'identifier': identifier, 'password': password},
             timeout=15,
         )
-        resp.raise_for_status()
-        return resp.json().get('accessJwt')
+        if not resp.ok:
+            print(f"  [bluesky] auth failed {resp.status_code}: {resp.text[:200]}")
+            return None
+        token = resp.json().get('accessJwt')
+        print(f"  [bluesky] auth ok")
+        return token
     except Exception as exc:
-        print(f"  [bluesky] auth failed: {exc}")
+        print(f"  [bluesky] auth error: {exc}")
         return None
 
 
@@ -291,12 +297,12 @@ def fetch_mastodon() -> list[dict]:
 
 
 def fetch_bluesky(tickers: list[str]) -> list[dict]:
-    """Search Bluesky for cashtag mentions. Uses app-password auth when configured."""
-    token    = _bsky_auth()
-    base_url = 'https://bsky.social/xrpc' if token else 'https://public.api.bsky.app/xrpc'
-    headers  = {'User-Agent': _BOT_UA}
-    if token:
-        headers['Authorization'] = f'Bearer {token}'
+    """Search Bluesky for cashtag mentions. Requires BSKY_IDENTIFIER + BSKY_APP_PASSWORD."""
+    token = _bsky_auth()
+    if not token:
+        print("  [bluesky] skipping — no auth token")
+        return []
+    headers = {'User-Agent': _BOT_UA, 'Authorization': f'Bearer {token}'}
 
     rows: list[dict] = []
     now  = time.time()
@@ -304,7 +310,7 @@ def fetch_bluesky(tickers: list[str]) -> list[dict]:
 
     for ticker in tickers[:30]:
         try:
-            url  = f"{base_url}/app.bsky.feed.searchPosts?q=%24{ticker}&limit=25"
+            url  = f"https://bsky.social/xrpc/app.bsky.feed.searchPosts?q=%24{ticker}&limit=25"
             resp = _session.get(url, timeout=15, headers=headers)
             resp.raise_for_status()
             for post in resp.json().get("posts", []):
