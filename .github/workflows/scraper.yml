@@ -28,5 +28,7 @@ jobs:
       - name: Run pipeline
         run: python -m scraper.pipeline
         env:
-          WORKER_URL:   ${{ secrets.WORKER_URL }}
-          WRITE_TOKEN:  ${{ secrets.WRITE_TOKEN }}
+          WORKER_URL:         ${{ secrets.WORKER_URL }}
+          WRITE_TOKEN:        ${{ secrets.WRITE_TOKEN }}
+          BSKY_IDENTIFIER:    ${{ secrets.BSKY_IDENTIFIER }}
+          BSKY_APP_PASSWORD:  ${{ secrets.BSKY_APP_PASSWORD }}
