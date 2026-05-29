@@ -3,18 +3,21 @@ Scraper pipeline — runs in GitHub Actions twice daily.
 
 Flow:
   1. PullPush Reddit  → raw_mentions (with VADER scores + upvote data)
-  2. Ticker sentiment → ticker_sentiment_summary + hype_signals
-  3. yFinance         → price_snapshots (OHLCV + RSI/MACD/BB indicators)
-                      + institutional_data
-  4. XGBoost          → model_predictions (technical + institutional features)
-  5. CNBC / SA RSS   → news_articles
-  6. SEC EDGAR        → insider_trades
-  7. Record           → pipeline_runs + scraper_events
+  2. Bluesky / Mastodon → raw_mentions
+  3. Google Trends    → raw_mentions (search interest as attention signal)
+  4. Ticker sentiment → ticker_sentiment_summary + hype_signals
+  5. yFinance         → price_snapshots (OHLCV + RSI/MACD/BB indicators)
+                      + institutional_data + ticker_metadata
+  6. XGBoost          → model_predictions (technical + institutional features)
+  7. CNBC / SA RSS   → news_articles
+  8. SEC EDGAR        → insider_trades
+  9. Record           → pipeline_runs + scraper_events
 """
 from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import sys
 import time
@@ -98,7 +101,25 @@ def extract_tickers(text: str) -> list[str]:
     return [s for s, _ in sorted(found.items(), key=lambda x: x[1])]
 
 
-_SOCIAL_UA = "retail-predict-bot/1.0 (+https://github.com/mhant/retail-predict-test)"
+def _bsky_auth() -> str | None:
+    """Exchange Bluesky app-password for a bearer token. Returns None if not configured."""
+    identifier = os.environ.get('BSKY_IDENTIFIER', '').strip()
+    password   = os.environ.get('BSKY_APP_PASSWORD', '').strip()
+    if not identifier or not password:
+        print("  [bluesky] BSKY_IDENTIFIER / BSKY_APP_PASSWORD not set — skipping auth")
+        return None
+    try:
+        resp = _session.post(
+            'https://bsky.social/xrpc/com.atproto.server.createSession',
+            json={'identifier': identifier, 'password': password},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get('accessJwt')
+    except Exception as exc:
+        print(f"  [bluesky] auth failed: {exc}")
+        return None
+
 
 # ── Ticker sentiment summary ───────────────────────────────────────────────────
 
@@ -109,54 +130,63 @@ def _parse_iso(s: str, default: float) -> float:
         return default
 
 
-def fetch_stocktwits(tickers: list[str]) -> list[dict]:
-    """Fetch per-symbol streams from StockTwits (less rate-limited than bulk endpoints)."""
-    rows: list[dict] = []
-    now  = time.time()
-    seen: set[str] = set()
+def fetch_google_trends(tickers: list[str]) -> list[dict]:
+    """
+    Fetch Google search interest as a retail attention signal.
+    Uses daily source_id so twice-daily runs don't double-count.
+    VADER scores are neutral — search interest has no sentiment direction.
+    """
+    try:
+        from pytrends.request import TrendReq
+    except ImportError:
+        print("  [google_trends] pytrends not installed, skipping")
+        return []
 
-    for ticker in tickers[:40]:
+    rows     = []
+    now      = time.time()
+    today    = date.today().isoformat()
+    pytrends = TrendReq(hl='en-US', tz=0, timeout=(10, 25))
+
+    for i in range(0, len(tickers), 5):
+        batch = tickers[i:i + 5]
         try:
-            url  = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-            resp = _session.get(url, timeout=15, headers={"User-Agent": _SOCIAL_UA})
-            resp.raise_for_status()
-            messages = resp.json().get("messages", [])
-            for msg in messages:
-                msg_id = str(msg.get("id", ""))
-                if msg_id in seen:
+            pytrends.build_payload(batch, timeframe='now 7-d', geo='')
+            data = pytrends.interest_over_time()
+            if data.empty:
+                time.sleep(2.0)
+                continue
+            latest = data.iloc[-1]
+            for ticker in batch:
+                if ticker not in latest:
                     continue
-                seen.add(msg_id)
-                body     = msg.get("body", "")
-                st_sent  = (msg.get("entities") or {}).get("sentiment", {})
-                basic    = st_sent.get("basic") if isinstance(st_sent, dict) else None
-                upvote   = 1.0 if basic == "Bullish" else (0.0 if basic == "Bearish" else 0.5)
-                scores   = _vader.polarity_scores(body[:2000])
-                created  = _parse_iso(msg.get("created_at", ""), now)
+                interest = int(latest[ticker])
+                if interest < 10:
+                    continue
                 rows.append({
-                    "source":         "stocktwits",
-                    "source_id":      msg_id,
-                    "subreddit":      "stocktwits",
-                    "ticker":         ticker,
-                    "title":          body[:500],
-                    "selftext":       "",
-                    "author":         (msg.get("user") or {}).get("username", ""),
-                    "score":          (msg.get("likes") or {}).get("total", 0),
-                    "ups":            0,
-                    "upvote_ratio":   upvote,
-                    "num_comments":   0,
-                    "url":            f"https://stocktwits.com/message/{msg_id}",
-                    "created_utc":    created,
-                    "scraped_utc":    now,
-                    "vader_compound": scores["compound"],
-                    "vader_positive": scores["pos"],
-                    "vader_negative": scores["neg"],
-                    "vader_neutral":  scores["neu"],
+                    'source':         'google_trends',
+                    'source_id':      f'gt_{ticker}_{today}',
+                    'subreddit':      'google_trends',
+                    'ticker':         ticker,
+                    'title':          f'${ticker} Google search interest: {interest}/100',
+                    'selftext':       '',
+                    'author':         '',
+                    'score':          interest,
+                    'ups':            0,
+                    'upvote_ratio':   0.5,
+                    'num_comments':   0,
+                    'url':            '',
+                    'created_utc':    now,
+                    'scraped_utc':    now,
+                    'vader_compound': 0.0,
+                    'vader_positive': 0.0,
+                    'vader_negative': 0.0,
+                    'vader_neutral':  1.0,
                 })
-            time.sleep(0.5)
+            time.sleep(2.0)
         except Exception as exc:
-            print(f"  [stocktwits] {ticker}: {exc}")
+            print(f"  [google_trends] batch {batch}: {exc}")
 
-    print(f"  [stocktwits] {len(rows)} messages across {len(tickers[:40])} tickers")
+    print(f"  [google_trends] {len(rows)} tickers with interest >= 10")
     return rows
 
 
@@ -261,15 +291,21 @@ def fetch_mastodon() -> list[dict]:
 
 
 def fetch_bluesky(tickers: list[str]) -> list[dict]:
-    """Search Bluesky for cashtag mentions (public API, no auth required)."""
+    """Search Bluesky for cashtag mentions. Uses app-password auth when configured."""
+    token    = _bsky_auth()
+    base_url = 'https://bsky.social/xrpc' if token else 'https://public.api.bsky.app/xrpc'
+    headers  = {'User-Agent': _BOT_UA}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+
     rows: list[dict] = []
     now  = time.time()
     seen: set[str] = set()
 
     for ticker in tickers[:30]:
         try:
-            url  = f"https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=%24{ticker}&limit=25"
-            resp = _session.get(url, timeout=15, headers={"User-Agent": _BOT_UA})
+            url  = f"{base_url}/app.bsky.feed.searchPosts?q=%24{ticker}&limit=25"
+            resp = _session.get(url, timeout=15, headers=headers)
             resp.raise_for_status()
             for post in resp.json().get("posts", []):
                 uri = post.get("uri", "")
@@ -845,11 +881,10 @@ def run() -> None:
         seed_tickers    = sorted(historical or config.WATCHLIST)
 
         print("\n── Scraping social sources ──")
-        st_mentions    = fetch_stocktwits(seed_tickers)
         bsky_mentions  = fetch_bluesky(seed_tickers)
         masto_mentions = fetch_mastodon()
         social_mentions = [
-            m for m in (st_mentions + bsky_mentions + masto_mentions)
+            m for m in (bsky_mentions + masto_mentions)
             if m["ticker"] not in invalid_tickers
         ]
 
@@ -867,13 +902,19 @@ def run() -> None:
         watch_extra      = [t for t in sorted(config.WATCHLIST) if t not in current_set and t not in set(hist_extra)]
         top_tickers      = (current_top + hist_extra + watch_extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
 
+        print("\n── Fetching Google Trends ──")
+        trends_mentions = [
+            m for m in fetch_google_trends(top_tickers[:50])
+            if m["ticker"] not in invalid_tickers
+        ]
+
         print("\n── Fetching yFinance news (per tracked ticker) ──")
         yf_news      = fetch_yfinance_news(top_tickers[:80])
         yf_mentions  = [m for m in news_to_mentions(yf_news) if m["ticker"] not in invalid_tickers]
         print(f"  → {len(yf_mentions)} mention rows from {len(yf_news)} yFinance articles")
 
-        # All mentions: social + RSS news + yFinance news
-        mentions = initial_mentions + yf_mentions
+        # All mentions: social + RSS news + Google Trends + yFinance news
+        mentions = initial_mentions + trends_mentions + yf_mentions
 
         print("\n── Ingesting user tips ──")
         ingest_user_tips(mentions)
@@ -885,7 +926,7 @@ def run() -> None:
         result = d1.ingest("raw_mentions", mentions)
         stats["new_mentions"] = result["inserted"]
         print(f"\n  → {result['inserted']} new, {result['skipped']} dupes "
-              f"({len(social_mentions)} social + {len(rss_mentions)} RSS + {len(yf_mentions)} yf_news)")
+              f"({len(social_mentions)} social + {len(rss_mentions)} RSS + {len(trends_mentions)} trends + {len(yf_mentions)} yf_news)")
 
         print("\n── Computing ticker sentiment summary + hype signals ──")
         summaries = compute_sentiment_summary(mentions)
