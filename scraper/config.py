@@ -43,29 +43,48 @@ WATCHLIST: frozenset[str] = frozenset([
     # Meme / high-retail-interest
     "GME", "AMC", "BBBY", "BB", "NOK", "KOSS", "EXPR", "CLOV",
     "WISH", "WKHS", "SPCE", "RIDE", "NKLA", "MULN", "FFIE",
-    # Crypto-adjacent
+    # Crypto-adjacent equities
     "COIN", "MARA", "RIOT", "MSTR", "HUT", "BITF", "CLSK",
+    "CORZ", "IREN", "CIFR",
+    # Bitcoin / crypto ETFs
+    "IBIT", "FBTC", "GBTC", "BITO",
     # Big tech / mega cap
     "AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META",
     "TSLA", "NFLX", "AMD", "INTC", "QCOM", "AVGO", "MU",
     "ORCL", "CRM", "ADBE", "NOW", "SNOW", "PLTR", "UBER",
+    # AI / new tech
+    "SMCI", "ARM", "DELL", "SOUN", "BBAI", "IONQ", "RGTI",
+    # Fintech / payments (major gaps previously)
+    "PYPL", "SQ", "SHOP", "MELI", "AFRM", "SOFI", "HOOD",
+    # Semiconductors (equipment + foundry)
+    "TSM", "ASML", "AMAT", "LRCX", "KLAC", "ON", "WOLF",
     # Finance / banks
     "JPM", "BAC", "WFC", "GS", "MS", "C", "BRK", "V", "MA",
+    "AXP", "COF", "SCHW",
     # EV / clean energy
     "RIVN", "LCID", "NIO", "XPEV", "LI", "FCEL", "PLUG", "CHPT",
     "BLNK", "EVGO", "FSR", "GOEV",
+    # Solar / clean energy
+    "ENPH", "FSLR", "SEDG", "RUN",
     # Social / retail faves
-    "SNAP", "PINS", "RBLX", "U", "DKNG", "PENN", "HOOD",
-    "SOFI", "AFRM", "UPST", "OPEN", "LMND",
-    # Healthcare / biotech
+    "SNAP", "PINS", "RBLX", "U", "DKNG", "PENN",
+    "UPST", "OPEN", "LMND",
+    # Healthcare / biotech / GLP-1
     "MRNA", "PFE", "BNTX", "JNJ", "ABBV", "LLY",
+    "NVO", "HIMS", "VKTX", "AMGN", "GILD", "REGN",
+    # Consumer / retail
+    "COST", "WMT", "HD", "TGT", "NKE", "LULU",
+    # Defense
+    "LMT", "RTX", "NOC", "GD", "AXON", "LDOS",
     # ETFs frequently mentioned
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "VIX",
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT",
+    "ARKK", "TQQQ", "SOXL", "SOXS", "UVXY", "JEPI", "JEPQ",
+    "XLF", "XLE", "XLK", "XBI",
     # China / emerging
-    "BABA", "JD", "PDD", "BIDU", "NIO",
+    "BABA", "JD", "PDD", "BIDU",
     # Other popular
     "F", "GM", "GE", "T", "VZ", "DIS", "BA", "CAT", "XOM",
-    "CVX", "OXY", "CLF", "X", "AA", "FCX",
+    "CVX", "OXY", "CLF", "X", "AA", "FCX", "LYFT",
 ])
 
 # Words that look like tickers but never are
@@ -114,42 +133,83 @@ FINANCIAL_CONTEXT: frozenset[str] = frozenset([
 # even with context (e.g. "meta", "riot", "snap" as non-finance words).
 NAME_TO_TICKER: dict[str, str] = {
     # Big tech — specific enough to be safe
-    "apple":        "AAPL",
-    "microsoft":    "MSFT",
-    "nvidia":       "NVDA",
-    "intel":        "INTC",
-    "tesla":        "TSLA",
-    "amazon":       "AMZN",
-    "alphabet":     "GOOGL",
-    "google":       "GOOGL",
-    "netflix":      "NFLX",
-    "uber":         "UBER",
-    "lyft":         "LYFT",
+    "apple":             "AAPL",
+    "microsoft":         "MSFT",
+    "nvidia":            "NVDA",
+    "intel":             "INTC",
+    "tesla":             "TSLA",
+    "amazon":            "AMZN",
+    "alphabet":          "GOOGL",
+    "google":            "GOOGL",
+    "netflix":           "NFLX",
+    "uber":              "UBER",
+    "lyft":              "LYFT",
+    "oracle":            "ORCL",
+    "salesforce":        "CRM",
+    "snowflake":         "SNOW",
+    "palantir":          "PLTR",
+    # AI / new tech
+    "supermicro":        "SMCI",
+    "super micro":       "SMCI",
+    "arm holdings":      "ARM",
+    "soundhound":        "SOUN",
+    "ionq":              "IONQ",
+    # Fintech / payments
+    "paypal":            "PYPL",
+    "shopify":           "SHOP",
+    "mercadolibre":      "MELI",
+    # Semiconductors
+    "taiwan semiconductor": "TSM",
+    "tsmc":              "TSM",
+    "asml":              "ASML",
+    "applied materials": "AMAT",
     # Meme / retail faves
-    "gamestop":     "GME",
-    "game stop":    "GME",
-    "coinbase":     "COIN",
-    "palantir":     "PLTR",
-    "robinhood":    "HOOD",
-    "sofi":         "SOFI",
-    "affirm":       "AFRM",
-    "upstart":      "UPST",
-    "roblox":       "RBLX",
-    "draftkings":   "DKNG",
-    "opendoor":     "OPEN",
-    "lemonade":     "LMND",
+    "gamestop":          "GME",
+    "game stop":         "GME",
+    "coinbase":          "COIN",
+    "robinhood":         "HOOD",
+    "sofi":              "SOFI",
+    "affirm":            "AFRM",
+    "upstart":           "UPST",
+    "roblox":            "RBLX",
+    "draftkings":        "DKNG",
+    "opendoor":          "OPEN",
+    "lemonade":          "LMND",
     # EV
-    "rivian":       "RIVN",
-    "lucid":        "LCID",
+    "rivian":            "RIVN",
+    "lucid":             "LCID",
+    # Healthcare / GLP-1
+    "novo nordisk":      "NVO",
+    "ozempic":           "NVO",
+    "wegovy":            "NVO",
+    "hims":              "HIMS",
+    "amgen":             "AMGN",
+    "gilead":            "GILD",
+    "regeneron":         "REGN",
+    # Consumer
+    "costco":            "COST",
+    "walmart":           "WMT",
+    "home depot":        "HD",
+    "nike":              "NKE",
+    "lululemon":         "LULU",
+    # Defense
+    "lockheed":          "LMT",
+    "lockheed martin":   "LMT",
+    "raytheon":          "RTX",
+    "northrop":          "NOC",
+    "axon":              "AXON",
     # Crypto adjacent
-    "microstrategy": "MSTR",
-    "marathon digital": "MARA",
+    "microstrategy":     "MSTR",
+    "marathon digital":  "MARA",
+    "core scientific":   "CORZ",
     # Banks / finance
-    "jpmorgan":     "JPM",
-    "jp morgan":    "JPM",
-    "bank of america": "BAC",
-    "goldman":      "GS",
-    "goldman sachs": "GS",
+    "jpmorgan":          "JPM",
+    "jp morgan":         "JPM",
+    "bank of america":   "BAC",
+    "goldman":           "GS",
+    "goldman sachs":     "GS",
+    "charles schwab":    "SCHW",
+    "american express":  "AXP",
 }
 
 # Finance slang lexicon injected into VADER

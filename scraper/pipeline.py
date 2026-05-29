@@ -4,8 +4,7 @@ Scraper pipeline — runs in GitHub Actions twice daily.
 Flow:
   1. PullPush Reddit  → raw_mentions (with VADER scores + upvote data)
   2. Bluesky / Mastodon → raw_mentions
-  3. Google Trends    → raw_mentions (search interest as attention signal)
-  4. Ticker sentiment → ticker_sentiment_summary + hype_signals
+  3. Ticker sentiment → ticker_sentiment_summary + hype_signals
   5. yFinance         → price_snapshots (OHLCV + RSI/MACD/BB indicators)
                       + institutional_data + ticker_metadata
   6. XGBoost          → model_predictions (technical + institutional features)
@@ -134,66 +133,6 @@ def _parse_iso(s: str, default: float) -> float:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except Exception:
         return default
-
-
-def fetch_google_trends(tickers: list[str]) -> list[dict]:
-    """
-    Fetch Google search interest as a retail attention signal.
-    Uses daily source_id so twice-daily runs don't double-count.
-    VADER scores are neutral — search interest has no sentiment direction.
-    """
-    try:
-        from pytrends.request import TrendReq
-    except ImportError:
-        print("  [google_trends] pytrends not installed, skipping")
-        return []
-
-    rows     = []
-    now      = time.time()
-    today    = date.today().isoformat()
-    pytrends = TrendReq(hl='en-US', tz=0, timeout=(10, 25))
-
-    for i in range(0, len(tickers), 5):
-        batch = tickers[i:i + 5]
-        try:
-            pytrends.build_payload(batch, timeframe='now 7-d', geo='')
-            data = pytrends.interest_over_time()
-            if data.empty:
-                time.sleep(2.0)
-                continue
-            latest = data.iloc[-1]
-            for ticker in batch:
-                if ticker not in latest:
-                    continue
-                interest = int(latest[ticker])
-                if interest < 10:
-                    continue
-                rows.append({
-                    'source':         'google_trends',
-                    'source_id':      f'gt_{ticker}_{today}',
-                    'subreddit':      'google_trends',
-                    'ticker':         ticker,
-                    'title':          f'${ticker} Google search interest: {interest}/100',
-                    'selftext':       '',
-                    'author':         '',
-                    'score':          interest,
-                    'ups':            0,
-                    'upvote_ratio':   0.5,
-                    'num_comments':   0,
-                    'url':            '',
-                    'created_utc':    now,
-                    'scraped_utc':    now,
-                    'vader_compound': 0.0,
-                    'vader_positive': 0.0,
-                    'vader_negative': 0.0,
-                    'vader_neutral':  1.0,
-                })
-            time.sleep(2.0)
-        except Exception as exc:
-            print(f"  [google_trends] batch {batch}: {exc}")
-
-    print(f"  [google_trends] {len(rows)} tickers with interest >= 10")
-    return rows
 
 
 def news_to_mentions(news_rows: list[dict]) -> list[dict]:
@@ -908,19 +847,13 @@ def run() -> None:
         watch_extra      = [t for t in sorted(config.WATCHLIST) if t not in current_set and t not in set(hist_extra)]
         top_tickers      = (current_top + hist_extra + watch_extra)[:config.MAX_TICKERS_FOR_MARKET_DATA]
 
-        print("\n── Fetching Google Trends ──")
-        trends_mentions = [
-            m for m in fetch_google_trends(top_tickers[:50])
-            if m["ticker"] not in invalid_tickers
-        ]
-
         print("\n── Fetching yFinance news (per tracked ticker) ──")
         yf_news      = fetch_yfinance_news(top_tickers[:80])
         yf_mentions  = [m for m in news_to_mentions(yf_news) if m["ticker"] not in invalid_tickers]
         print(f"  → {len(yf_mentions)} mention rows from {len(yf_news)} yFinance articles")
 
-        # All mentions: social + RSS news + Google Trends + yFinance news
-        mentions = initial_mentions + trends_mentions + yf_mentions
+        # All mentions: social + RSS news + yFinance news
+        mentions = initial_mentions + yf_mentions
 
         print("\n── Ingesting user tips ──")
         ingest_user_tips(mentions)
@@ -932,7 +865,7 @@ def run() -> None:
         result = d1.ingest("raw_mentions", mentions)
         stats["new_mentions"] = result["inserted"]
         print(f"\n  → {result['inserted']} new, {result['skipped']} dupes "
-              f"({len(social_mentions)} social + {len(rss_mentions)} RSS + {len(trends_mentions)} trends + {len(yf_mentions)} yf_news)")
+              f"({len(social_mentions)} social + {len(rss_mentions)} RSS + {len(yf_mentions)} yf_news)")
 
         print("\n── Computing ticker sentiment summary + hype signals ──")
         summaries = compute_sentiment_summary(mentions)
