@@ -196,6 +196,7 @@ export default {
            AVG(upvote_ratio)                           AS avg_upvote_ratio,
            COUNT(DISTINCT subreddit)                   AS source_count,
            MAX(scraped_utc)                            AS latest_mention_utc,
+           MIN(scraped_utc)                            AS first_mention_utc,
            tm.company_name,
            tm.sector,
            tm.industry,
