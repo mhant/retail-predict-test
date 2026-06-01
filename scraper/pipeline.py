@@ -2,8 +2,7 @@
 Scraper pipeline — runs in GitHub Actions twice daily.
 
 Flow:
-  1. PullPush Reddit  → raw_mentions (with VADER scores + upvote data)
-  2. Bluesky / Mastodon → raw_mentions
+  1. Bluesky / Mastodon → raw_mentions (with VADER scores)
   3. Ticker sentiment → ticker_sentiment_summary + hype_signals
   5. yFinance         → price_snapshots (OHLCV + RSI/MACD/BB indicators)
                       + institutional_data + ticker_metadata
@@ -45,7 +44,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="yfinance")
 _vader = SentimentIntensityAnalyzer()
 _vader.lexicon.update(config.FINANCE_LEXICON)
 
-# ── HTTP session for PullPush + news ──────────────────────────────────────────
+# ── HTTP session ──────────────────────────────────────────────────────────────
 _BOT_UA    = "retail-predict-bot/1.0 (+https://github.com/mhant/retail-predict-test)"
 _EDGAR_UA  = "retail-predict-research contact@retail-predict-research.com"
 _session   = requests.Session()
