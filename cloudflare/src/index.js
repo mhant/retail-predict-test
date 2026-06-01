@@ -426,6 +426,16 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
       return apiJson({ ok: true, ticker, data: results })
     }
 
+    // GET /api/tips/feed — all approved tips, newest first (public)
+    if (request.method === 'GET' && path === '/api/tips/feed') {
+      const { results } = await env.DB.prepare(
+        `SELECT id, ticker, body, submitted_at
+         FROM tips WHERE status = 'approved'
+         ORDER BY submitted_at DESC LIMIT 100`
+      ).all()
+      return apiJson({ ok: true, data: results })
+    }
+
     // POST /api/tips/:id/report — flag a tip for review (public)
     const reportMatch = path.match(/^\/api\/tips\/(\d+)\/report$/)
     if (request.method === 'POST' && reportMatch) {
