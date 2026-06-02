@@ -185,8 +185,10 @@ export default {
 
     // GET /api/sentiment?window=168
     // Aggregates raw_mentions directly using scraped_utc so all window sizes work.
+    // window param = hours, default 168 (7d), capped at 720 (30d).
     if (request.method === 'GET' && path === '/api/sentiment') {
-      const cutoff = Date.now() / 1000 - 720 * 3600; // fixed 30-day window
+      const windowHours = Math.min(720, Math.max(1, parseInt(params.get('window') || '168', 10) || 168))
+      const cutoff = Date.now() / 1000 - windowHours * 3600;
       const { results } = await env.DB.prepare(
         `SELECT
            rm.ticker,
